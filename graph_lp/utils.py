@@ -54,12 +54,6 @@ def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
-def stable_hash(items: Dict[str, Any]) -> str:
-    """Compute a deterministic short hash for a JSON-serialisable mapping."""
-    blob = json.dumps(items, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha1(blob).hexdigest()[:10]
-
-
 def write_json(path: str, obj: Dict[str, Any]) -> None:
     """Write a mapping as JSON to ``path`` with stable formatting."""
     with open(path, "w", encoding="utf-8") as f:

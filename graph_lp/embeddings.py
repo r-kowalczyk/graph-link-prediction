@@ -10,8 +10,6 @@ from typing import List
 import numpy as np
 import networkx as nx
 
-from sklearn.feature_extraction.text import HashingVectorizer
-
 
 def pyg_node2vec_structural_embeddings(
     g: nx.Graph,
@@ -127,10 +125,3 @@ def transformer_semantic_embeddings(
                 h = mdl(**enc).last_hidden_state[:, 0, :]
         out.append(h.detach().cpu().numpy())
     return np.concatenate(out, axis=0).astype(np.float32)
-
-
-def hashing_semantic_embeddings(texts: List[str], dim: int) -> np.ndarray:
-    """Encode texts with a stateless hashing trick to a fixed dimension."""
-    vec = HashingVectorizer(n_features=int(dim), alternate_sign=False, norm="l2")
-    x = vec.transform(texts)
-    return x.toarray().astype(np.float32)

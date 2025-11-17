@@ -77,7 +77,7 @@ def run(cfg: Dict, variant: str) -> Dict:
         cfg["data"]["edges_csv"],
         cfg["data"]["ground_truth_csv"],
     )
-    node_idx, idx2node, node_texts = build_node_index(nodes)
+    node_idx, _, node_texts = build_node_index(nodes)
 
     # Prepare pairs and labels (prefer notebook columns: source,target,y)
     gt = gt.copy()
