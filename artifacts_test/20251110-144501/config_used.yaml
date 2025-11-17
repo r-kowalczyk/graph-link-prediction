@@ -1,0 +1,58 @@
+# Minimal test configuration for quick pipeline validation
+# This config uses small parameters to run fast while still testing all components
+
+seed: 42
+device: auto  # Will use CPU if no GPU available
+artifacts_dir: artifacts_test
+cache_dir: artifacts_test/cache
+run_name: test_run
+
+data:
+  dir: data/mini_demo
+  nodes_csv: Nodes.csv
+  edges_csv: Edges.csv
+  ground_truth_csv: Ground_Truth.csv
+  undirected: true
+
+splits:
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+
+negatives:
+  synthetic: true
+  pos_to_neg_ratio: 1.0
+
+structural:
+  dim: 8  # Small dimension for fast testing
+  walk_length: 5  # Shorter walks
+  context_size: 3  # Smaller context
+  walks_per_node: 5  # Fewer walks per node
+  epochs: 2  # Fewer training epochs
+  lr: 0.01
+  batch_size: 32  # Smaller batches
+
+semantic:
+  model_name: sentence-transformers/all-MiniLM-L6-v2  # Small, fast model instead of bioformer
+  batch_size: 32  # Smaller batches
+  max_length: 64  # Shorter sequences
+
+features:
+  pair_mode: concat
+  order_invariant: true
+  scaler: standard
+
+model:
+  type: logreg
+  mlp:
+    batch_size: 64
+    search_hidden_dims: [16, 32]  # Smaller hidden dimensions
+    search_lrs: [0.001]
+    search_epochs: [2]  # Fewer epochs
+
+metrics:
+  precision_at_k: 5
+  recall_at_k: 5
+
+plots:
+  dpi: 60  # Lower DPI for faster plotting

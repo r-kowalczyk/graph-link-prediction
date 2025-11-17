@@ -1,0 +1,49 @@
+{
+  "mlp_best": {
+    "epochs": 2,
+    "hidden_dim": 16,
+    "lr": 0.001,
+    "val_auc": 1.0
+  },
+  "test": {
+    "brier": 0.31504201151362055,
+    "f1": 0.0,
+    "pr_auc": 0.5,
+    "precision_at_k": 0.5,
+    "recall_at_k": 0.9999999900000002,
+    "roc_auc": 0.0
+  },
+  "test_cold_start": {
+    "brier": 0.22257838821580253,
+    "f1": 0.6666666666666666,
+    "pr_auc": 1.0,
+    "precision_at_k": 0.5,
+    "recall_at_k": 0.9999999900000002,
+    "roc_auc": 1.0
+  },
+  "test_logreg": {
+    "brier": 0.22257838821580253,
+    "f1": 0.6666666666666666,
+    "pr_auc": 1.0,
+    "precision_at_k": 0.5,
+    "recall_at_k": 0.9999999900000002,
+    "roc_auc": 1.0
+  },
+  "val_cold_start": {
+    "brier": 2.886626027806902e-05,
+    "f1": 1.0,
+    "pr_auc": 1.0,
+    "precision_at_k": 0.5,
+    "recall_at_k": 0.9999999900000002,
+    "roc_auc": 1.0
+  },
+  "val_logreg": {
+    "brier": 2.886626027806902e-05,
+    "f1": 1.0,
+    "pr_auc": 1.0,
+    "precision_at_k": 0.5,
+    "recall_at_k": 0.9999999900000002,
+    "roc_auc": 1.0
+  },
+  "variant": "semantic"
+}
