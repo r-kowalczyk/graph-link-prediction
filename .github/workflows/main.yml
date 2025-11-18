@@ -10,7 +10,7 @@ jobs:
   tests:
     strategy:
       matrix:
-        python-version: ["3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13"]
         os: ["ubuntu-latest", "macos-latest", "windows-latest"]
 
     runs-on: ${{ matrix.os }}
@@ -41,6 +41,5 @@ jobs:
         run: nox --pythons ${{ matrix.python-version }}
         shell: bash
 
-
       - name: Run tests
-        run: uv run --extra test python -m pytest tests --cov --cov-config=pyproject.toml --cov-report=xml
+        run: uv run --extra test python -m pytest tests/ -v --cov=graph_lp --cov-report=term-missing

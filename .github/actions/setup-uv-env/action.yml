@@ -23,7 +23,6 @@ runs:
         activate-environment: true
 
     - name: Install project dependencies
-      if: steps.cache-uv-dependencies.outputs.cache-hit != 'true'
       run: |
-        uv sync --frozen
+        uv sync --frozen --extra test --extra dev
       shell: bash
