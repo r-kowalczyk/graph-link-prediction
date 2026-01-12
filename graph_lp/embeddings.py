@@ -1,7 +1,7 @@
-"""Embedding helpers: structural Node2Vec and semantic transformer encodings.
+"""Embedding helpers: structural Node2Vec and semantic transformer embeddings.
 
 The structural function uses PyTorch Geometric's Node2Vec to learn embeddings
-from random walks on the graph. The semantic function encodes free-text fields
+from random walks on the graph. The semantic function embeds free-text fields
 using a transformer model and takes the [CLS] token representation.
 """
 
@@ -66,8 +66,11 @@ def pyg_node2vec_structural_embeddings(
     optim = torch.optim.SparseAdam(model.parameters(), lr=lr)
     loader = model.loader(batch_size=batch_size, shuffle=True, num_workers=0)
     model.train()
-    # Loop over epochs; the loader yields positive/negative random walks
-    for _ in range(epochs):
+    for epoch_index in range(epochs):
+        print(
+            f"    Node2Vec epoch {epoch_index + 1}/{epochs}...",
+            flush=True,
+        )
         for pos_rw, neg_rw in loader:
             pos_rw, neg_rw = pos_rw.to(device), neg_rw.to(device)
             optim.zero_grad()
@@ -87,12 +90,12 @@ def transformer_semantic_embeddings(
     max_length: int,
     device: str,
 ) -> np.ndarray:
-    """Encode a list of texts using a transformer [CLS] representation.
+    """Embed a list of texts using a transformer [CLS] representation.
 
     Args:
-        texts: Text strings to encode (one per node).
+        texts: Text strings to embed (one per node).
         model_name: Hugging Face model identifier to load.
-        batch_size: Mini-batch size during encoding.
+        batch_size: Mini-batch size during embedding.
         max_length: Maximum token length; inputs are truncated as needed.
         device: Device string, e.g. ``\"cpu\"`` or ``\"cuda\"``.
 
@@ -108,8 +111,14 @@ def transformer_semantic_embeddings(
     out = []
     # Mixed precision can accelerate inference on CUDA
     use_amp = str(device).startswith("cuda")
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i : i + batch_size]
+    total_batches = (len(texts) + batch_size - 1) // batch_size
+    for batch_start in range(0, len(texts), batch_size):
+        batch = texts[batch_start : batch_start + batch_size]
+        batch_index = batch_start // batch_size
+        print(
+            f"    Semantic batch {batch_index + 1}/{total_batches}...",
+            flush=True,
+        )
         enc = tok(
             batch,
             padding=True,

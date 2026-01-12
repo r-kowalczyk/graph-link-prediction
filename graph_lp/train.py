@@ -69,8 +69,9 @@ def run(cfg: Dict, variant: str) -> Dict:
     """
     set_all_seeds(int(cfg["seed"]))
     device = resolve_device(cfg["device"])  # Device reserved for torch-based models
+    print("Step 1/9: loading data tables and building node index...", flush=True)
 
-    # Load raw tables and build node indices/texts for encoders
+    # Load raw tables and build node indices/texts for embedding models
     nodes, edges, gt = load_data(
         cfg["data"]["dir"],
         cfg["data"]["nodes_csv"],
@@ -79,6 +80,7 @@ def run(cfg: Dict, variant: str) -> Dict:
     )
     node_idx, _, node_texts = build_node_index(nodes)
 
+    print("Step 2/9: preparing graph and label splits...", flush=True)
     # Prepare pairs and labels (prefer notebook columns: source,target,y)
     gt = gt.copy()
     gt["source"] = gt["source"].astype(str)
@@ -159,8 +161,14 @@ def run(cfg: Dict, variant: str) -> Dict:
     if variant in ("structural", "hybrid"):
         structural_path = os.path.join(cache_dir, f"struct_{cache_key}.npy")
         if os.path.exists(structural_path):
+            print("Step 3/9: loading cached structural embeddings...", flush=True)
             structural = np.load(structural_path)
         else:
+            print(
+                "Step 3/9: training structural Node2Vec embeddings "
+                f"(dim={cfg['structural']['dim']}, epochs={cfg['structural']['epochs']})...",
+                flush=True,
+            )
             # Compute Node2Vec embeddings on the leakage-safe training graph
             structural = pyg_node2vec_structural_embeddings(
                 g_train,
@@ -178,10 +186,15 @@ def run(cfg: Dict, variant: str) -> Dict:
     if variant in ("semantic", "hybrid"):
         semantic_path = os.path.join(cache_dir, f"semantic_{cache_key}.npy")
         if os.path.exists(semantic_path):
+            print("Step 4/9: loading cached semantic embeddings...", flush=True)
             semantic = np.load(semantic_path)
         else:
+            print(
+                "Step 4/9: computing semantic embeddings with the transformer model...",
+                flush=True,
+            )
             texts = node_texts
-            # Encode text fields with a transformer model
+            # Embed text fields with a transformer model
             semantic = transformer_semantic_embeddings(
                 texts,
                 str(cfg["semantic"]["model_name"]),
@@ -191,6 +204,7 @@ def run(cfg: Dict, variant: str) -> Dict:
             )
             np.save(semantic_path, semantic)
 
+    print("Step 5/9: fusing embeddings and building pairwise features...", flush=True)
     emb = fuse_embeddings(structural, semantic)
 
     # Build pairwise features and standardise them using statistics from training
@@ -203,12 +217,14 @@ def run(cfg: Dict, variant: str) -> Dict:
     x_val = scaler.transform(x_val)
     x_test = scaler.transform(x_test)
 
+    print("Step 6/9: training logistic regression baseline...", flush=True)
     # Baseline classifier: Logistic Regression as a simple linear model
     lr_model = LogRegModel()
     lr_model.fit(x_train, np.asarray(y_train))
     val_prob_lr = lr_model.predict_proba(x_val)
     test_prob_lr = lr_model.predict_proba(x_test)
 
+    print("Step 7/9: computing baseline validation and test metrics...", flush=True)
     # Compute metrics and save diagnostic plots for each split
     run_dir = os.path.join(cfg["artifacts_dir"], time_stamp())
     curves_dir = os.path.join(run_dir, "curves")
@@ -228,6 +244,13 @@ def run(cfg: Dict, variant: str) -> Dict:
         int(cfg["plots"]["dpi"]),
     )
 
+    print(
+        "Step 8/9: running MLP hyperparameter search "
+        f"(hidden dims={cfg['model']['mlp'].get('search_hidden_dims', [128, 256])}, "
+        f"lrs={cfg['model']['mlp'].get('search_lrs', [1e-3, 5e-4])}, "
+        f"epochs={cfg['model']['mlp'].get('search_epochs', [5, 10])})...",
+        flush=True,
+    )
     # MLP hyperparameter search over a small grid; keep the best by validation AUC
     hd_list = list(map(int, cfg["model"]["mlp"].get("search_hidden_dims", [128, 256])))
     lr_list = list(map(float, cfg["model"]["mlp"].get("search_lrs", [1e-3, 5e-4])))
@@ -262,6 +285,7 @@ def run(cfg: Dict, variant: str) -> Dict:
         int(cfg["plots"]["dpi"]),
     )
 
+    print("Step 9/9: evaluating cold-start subsets and saving artefacts...", flush=True)
     # Cold-start analysis: metrics restricted to pairs with low-degree endpoints
     cs_mask_val = cold_start_mask(
         [p for p, _ in zip(x_pairs_train, y_train)], x_pairs_val
@@ -321,6 +345,7 @@ def run(cfg: Dict, variant: str) -> Dict:
             )
         except Exception:
             pass
+    print(f"Run complete. Artefacts are in: {run_dir}", flush=True)
     return out
 
 

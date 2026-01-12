@@ -20,7 +20,7 @@ This project implements a link classification pipeline that leverages hybrid nod
 
 **2) Hybrid Embedding Generation:**
 
-- Structural embeddings are generated using Node2Vec to encode the structural properties of the network. Ideally, would want to use something like a HeteroRGCN (akin to the TxGNN approach) that captures differences between node types but using Node2Vec here for speed and simplicity.
+ - Structural embeddings are generated using Node2Vec to embed the structural properties of the network. Ideally, would want to use something like a HeteroRGCN (akin to the TxGNN approach) that captures differences between node types but using Node2Vec here for speed and simplicity.
 
 - Semantic embeddings are generated using the BioBERT model to capture textual information from node attributes (names and descriptions). BioBERT is a pre-trained transformer model specific to the Biomedical domain and easily accessible from HuggingFace.
 

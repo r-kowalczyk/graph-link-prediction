@@ -1,7 +1,7 @@
 """Data loading helpers for node/edge CSVs and text fields.
 
 This module provides small utilities to read CSV files from a directory and to
-prepare node identifiers and text fields that can be fed into text encoders.
+prepare node identifiers and text fields that can be fed into text embedding models.
 It assumes a simple schema with columns ``id``, ``name`` and ``description`` for nodes.
 """
 
@@ -58,7 +58,7 @@ def build_node_index(
     for _, row in nodes.iterrows():
         name = str(row.get("name", ""))
         desc = str(row.get("description", ""))
-        # Combine name and description; this is what the text encoder will see
+        # Combine name and description; this is what the text embedding model will see
         text = (name + " " + desc).strip()
         if not text:
             text = "No description"
