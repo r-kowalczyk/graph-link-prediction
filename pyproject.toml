@@ -57,3 +57,12 @@ ignore_errors = true
 [[tool.mypy.overrides]]
 module = ["notebooks.*"]
 ignore_errors = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+  "--cov=graph_lp",
+  "--cov=tests",
+  "--cov-fail-under=100",
+  "--cov-report=term-missing",
+]

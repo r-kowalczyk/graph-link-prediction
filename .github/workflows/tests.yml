@@ -1,0 +1,27 @@
+name: tests
+
+on:
+  push:
+    branches:
+      - '**'
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .[test]
+
+      - name: Run pytest with coverage
+        run: |
+          pytest --cov=graph_lp --cov=tests --cov-fail-under=100 --cov-report=term-missing
