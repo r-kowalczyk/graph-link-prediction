@@ -42,6 +42,8 @@ def compute_and_plot(
     plt.xlabel("False Positive Rate")
     plt.ylabel("True Positive Rate")
     plt.title("ROC Curve")
+    plt.xlim(0, 1)
+    plt.ylim(0, 1)
     plt.savefig(os.path.join(out_dir, "roc.png"), dpi=dpi, bbox_inches="tight")
     plt.close()
 
@@ -51,6 +53,8 @@ def compute_and_plot(
     plt.xlabel("Recall")
     plt.ylabel("Precision")
     plt.title("PR Curve")
+    plt.xlim(0, 1)
+    plt.ylim(0, 1)
     plt.savefig(os.path.join(out_dir, "pr.png"), dpi=dpi, bbox_inches="tight")
     plt.close()
     return m
