@@ -56,3 +56,16 @@ repos:
         language: pygrep
         exclude: '^static/|\.lock'
         files: .
+    -   id: pytest-with-coverage
+        name: Run pytest with 100% coverage
+        language: python
+        entry: pytest
+        args:
+          - --cov=graph_lp
+          - --cov=tests
+          - --cov-fail-under=100
+          - --cov-report=term-missing
+        additional_dependencies:
+          - ".[test]"
+        pass_filenames: false
+        always_run: true

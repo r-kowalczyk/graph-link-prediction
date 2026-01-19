@@ -1,7 +1,9 @@
 """Unit tests for pair feature construction utilities."""
 
 import numpy as np
-from graph_lp.features import pair_features, fuse_embeddings
+import pytest
+
+from graph_lp.features import fuse_embeddings, pair_features
 
 
 def test_pair_features_shapes_and_modes():
@@ -17,6 +19,14 @@ def test_pair_features_shapes_and_modes():
 
     x = pair_features(emb, pairs, mode="product")
     assert x.shape == (2, 3)
+
+
+def test_pair_features_unknown_mode():
+    """Test that pair_features raises ValueError for unknown modes."""
+    emb = np.arange(12, dtype=np.float32).reshape(4, 3)
+    pairs = [(0, 1)]
+    with pytest.raises(ValueError, match="Unknown pair mode"):
+        pair_features(emb, pairs, mode="invalid")
 
 
 def test_fuse_embeddings_none_and_concat():
@@ -39,3 +49,9 @@ def test_fuse_embeddings_none_and_concat():
     # Single-source passthrough behaviour is important for simpler variants
     assert fuse_embeddings(structural, None).shape == (3, 2)
     assert fuse_embeddings(None, semantic).shape == (3, 5)
+
+
+def test_fuse_embeddings_both_none():
+    """Test that fuse_embeddings raises ValueError when both inputs are None."""
+    with pytest.raises(ValueError, match="At least one embedding must be provided"):
+        fuse_embeddings(None, None)

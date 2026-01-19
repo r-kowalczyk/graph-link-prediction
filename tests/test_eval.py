@@ -41,3 +41,19 @@ def test_cold_start_mask_marks_low_degree_pairs():
 
     # We check exact positions to avoid ambiguous shape-only assertions
     assert mask.tolist() == [True, True, True, False]
+
+
+def test_cold_start_mask_no_low_degree():
+    """Test that cold_start_mask returns all False when all nodes have high degree."""
+    train_edges = [(0, 1), (1, 2), (2, 0), (0, 3), (1, 3), (2, 3)]
+    pairs = [(0, 1), (1, 2)]
+    mask = cold_start_mask(train_edges, pairs, degree_threshold=1)
+    assert mask.tolist() == [False, False]
+
+
+def test_cold_start_mask_empty_pairs():
+    """Test that cold_start_mask handles empty pairs list."""
+    train_edges = [(0, 1), (1, 2)]
+    pairs = []
+    mask = cold_start_mask(train_edges, pairs, degree_threshold=1)
+    assert len(mask) == 0

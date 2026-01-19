@@ -141,7 +141,7 @@ def hyperparam_search_mlp(
         best_conf: Tuple of (hidden_dim, lr, epochs) for the best model.
         best_auc: Best validation ROC-AUC achieved during the search.
     """
-    best_auc = 0.0
+    best_auc = -1.0
     best_conf: Optional[Tuple[int, float, int]] = None
     best_model: Optional[LinkClassifier] = None
     for hd in hidden_dims:

@@ -2,7 +2,8 @@
 
 import numpy as np
 import pytest
-from graph_lp.metrics import compute_classification_metrics
+
+from graph_lp.metrics import compute_classification_metrics, curves
 
 
 def test_compute_classification_metrics_on_perfect_ranking():
@@ -45,3 +46,35 @@ def test_compute_classification_metrics_on_constant_labels():
     assert m["roc_auc"] == 0.5
     assert m["pr_auc"] == 0.0
     assert m["f1"] == 0.0
+
+
+def test_compute_classification_metrics_all_positive():
+    """Test metrics when all labels are positive."""
+    y_true = np.ones(4, dtype=int)
+    y_prob = np.array([0.1, 0.2, 0.3, 0.4], dtype=float)
+    m = compute_classification_metrics(y_true, y_prob, k=2)
+    assert m["roc_auc"] == 0.5
+    assert m["pr_auc"] == pytest.approx(1.0, rel=1e-6)
+    assert m["f1"] == 0.0
+
+
+def test_compute_classification_metrics_k_zero():
+    """Test that k=0 returns zero for precision_at_k and recall_at_k."""
+    y_true = np.array([0, 1, 1, 0], dtype=int)
+    y_prob = np.array([0.1, 0.9, 0.8, 0.2], dtype=float)
+    m = compute_classification_metrics(y_true, y_prob, k=0)
+    assert m["precision_at_k"] == 0.0
+    assert m["recall_at_k"] == 0.0
+
+
+def test_curves():
+    """Test that curves returns ROC and PR curve coordinates."""
+    y_true = np.array([0, 1, 1, 0], dtype=int)
+    y_prob = np.array([0.1, 0.9, 0.8, 0.2], dtype=float)
+    (fpr, tpr), (prec, rec, _) = curves(y_true, y_prob)
+    assert len(fpr) == len(tpr)
+    assert len(prec) == len(rec)
+    assert all(0 <= x <= 1 for x in fpr)
+    assert all(0 <= x <= 1 for x in tpr)
+    assert all(0 <= x <= 1 for x in prec)
+    assert all(0 <= x <= 1 for x in rec)
