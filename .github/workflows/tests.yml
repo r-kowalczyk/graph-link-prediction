@@ -20,8 +20,10 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install .[test]
+          python -m pip install -e .[test]
 
       - name: Run pytest with coverage
+        env:
+          PYTHONPATH: ${{ github.workspace }}
         run: |
           pytest --cov=graph_lp --cov=tests --cov-fail-under=100 --cov-report=term-missing
