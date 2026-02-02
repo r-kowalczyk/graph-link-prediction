@@ -182,6 +182,11 @@ def run(cfg: Dict, variant: str) -> Dict:
                 str(device),
             )
             np.save(structural_path, structural)
+    else:
+        print(
+            "Step 3/9: skipping structural embedding computation for speed...",
+            flush=True,
+        )
 
     if variant in ("semantic", "hybrid"):
         semantic_path = os.path.join(cache_dir, f"semantic_{cache_key}.npy")
