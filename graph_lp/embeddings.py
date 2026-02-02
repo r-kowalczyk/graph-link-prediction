@@ -102,20 +102,7 @@ def transformer_semantic_embeddings(
     Returns:
         A NumPy array of shape (len(texts), hidden_dim) with float32 embeddings.
     """
-    import os
     import torch
-
-    # This project uses the PyTorch transformer backend, so we explicitly disable
-    # TensorFlow and Flax integration in Transformers. This prevents TensorFlow
-    # initialisation logs in environments where TensorFlow is installed for other
-    # work, and it keeps the quickstart output clean by default.
-    #
-    # Set GRAPH_LP_ENABLE_TENSORFLOW=1 to explicitly allow TensorFlow imports in
-    # the current process.
-    if os.environ.get("GRAPH_LP_ENABLE_TENSORFLOW", "0") != "1":
-        os.environ["TRANSFORMERS_NO_TF"] = "1"
-        os.environ["TRANSFORMERS_NO_FLAX"] = "1"
-        os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
     from transformers import AutoTokenizer, AutoModel
 
