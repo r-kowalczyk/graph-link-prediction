@@ -102,25 +102,39 @@ def transformer_semantic_embeddings(
     Returns:
         A NumPy array of shape (len(texts), hidden_dim) with float32 embeddings.
     """
+    import os
     import torch
+
+    # This project uses the PyTorch transformer backend, so we explicitly disable
+    # TensorFlow and Flax integration in Transformers. This prevents TensorFlow
+    # initialisation logs in environments where TensorFlow is installed for other
+    # work, and it keeps the quickstart output clean by default.
+    #
+    # Set GRAPH_LP_ENABLE_TENSORFLOW=1 to explicitly allow TensorFlow imports in
+    # the current process.
+    if os.environ.get("GRAPH_LP_ENABLE_TENSORFLOW", "0") != "1":
+        os.environ["TRANSFORMERS_NO_TF"] = "1"
+        os.environ["TRANSFORMERS_NO_FLAX"] = "1"
+        os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+
     from transformers import AutoTokenizer, AutoModel
 
-    tok = AutoTokenizer.from_pretrained(model_name, use_fast=True)
-    mdl = AutoModel.from_pretrained(model_name).to(device)
-    mdl.eval()
-    out = []
+    tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+    model = AutoModel.from_pretrained(model_name).to(device)
+    model.eval()
+    embedding_batches = []
     # Mixed precision can accelerate inference on CUDA
     use_amp = str(device).startswith("cuda")
     total_batches = (len(texts) + batch_size - 1) // batch_size
     for batch_start in range(0, len(texts), batch_size):
-        batch = texts[batch_start : batch_start + batch_size]
+        batch_texts = texts[batch_start : batch_start + batch_size]
         batch_index = batch_start // batch_size
         print(
             f"    Semantic batch {batch_index + 1}/{total_batches}...",
             flush=True,
         )
-        enc = tok(
-            batch,
+        encoded_inputs = tokenizer(
+            batch_texts,
             padding=True,
             truncation=True,
             max_length=max_length,
@@ -129,8 +143,8 @@ def transformer_semantic_embeddings(
         with torch.no_grad():
             if use_amp:
                 with torch.amp.autocast("cuda"):
-                    h = mdl(**enc).last_hidden_state[:, 0, :]
+                    cls_embeddings = model(**encoded_inputs).last_hidden_state[:, 0, :]
             else:
-                h = mdl(**enc).last_hidden_state[:, 0, :]
-        out.append(h.detach().cpu().numpy())
-    return np.concatenate(out, axis=0).astype(np.float32)
+                cls_embeddings = model(**encoded_inputs).last_hidden_state[:, 0, :]
+        embedding_batches.append(cls_embeddings.detach().cpu().numpy())
+    return np.concatenate(embedding_batches, axis=0).astype(np.float32)
