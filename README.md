@@ -3,6 +3,33 @@
 
 # ```Graph Link Prediction```
 
+# Quickstart
+
+This quickstart runs start to finish on CPU using a tiny bundled CSV dataset. The first run may take a few minutes because the transformer model weights are downloaded; subsequent runs are typically much faster because embeddings are cached.
+
+## Commands
+
+Prerequisites: Python 3.11+ and `uv` installed (see [uv installation instructions](https://docs.astral.sh/uv/)).
+
+```bash
+# Create the environment (installs the project in editable mode)
+uv sync --all-groups
+
+# Train and write run artefacts under artifacts_quickstart/<timestamp>/
+uv run graph-lp train --config configs/quickstart.yaml --device cpu --seed 42
+
+# Read and report metrics from the latest run directory
+uv run graph-lp evaluate --config configs/quickstart.yaml --device cpu
+```
+
+## What you get
+
+The training command writes a timestamped run folder under `artifacts_quickstart/`, containing:
+
+- `metrics.json` (evaluation metrics)
+- `config_used.yaml` (the exact config text used for the run)
+- `curves/roc.png` and `curves/pr.png` (diagnostic plots)
+
 
 # Overview
 
