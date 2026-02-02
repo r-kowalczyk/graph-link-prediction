@@ -26,7 +26,6 @@ dependencies = [
 
 [project.scripts]
 graph-lp = "graph_lp.cli:main"
-graph_lp = "graph_lp.cli:main"
 
 [project.optional-dependencies]
 test = [

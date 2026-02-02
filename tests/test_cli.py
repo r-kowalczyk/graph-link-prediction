@@ -271,6 +271,38 @@ def test_cli_run_returns_train_exit_code_without_running_evaluate(monkeypatch):
     assert exit_code == 7
 
 
+def test_cli_run_exposes_run_dir_attribute_to_evaluate(tmp_path, monkeypatch, capsys):
+    """The run subcommand should not crash when evaluate reads arguments.run_dir.
+
+    tmp_path provides a temporary output folder, monkeypatch replaces the training
+    runner with a function that does nothing, and capsys captures standard output so the
+    test can assert that evaluation completed by printing the metrics path.
+    """
+
+    repository_root = Path(__file__).resolve().parents[1]
+    quickstart_config_path = repository_root / "configs" / "quickstart.yaml"
+    output_directory = tmp_path / "run_output"
+    run_directory = output_directory / "20200101-000000"
+    run_directory.mkdir(parents=True, exist_ok=True)
+    (run_directory / "metrics.json").write_text("{}", encoding="utf-8")
+
+    # Avoid running the full training pipeline because evaluation reads metrics from disk.
+    monkeypatch.setattr(cli.training_module, "run", lambda *_args, **_kwargs: None)
+
+    exit_code = cli.main(
+        [
+            "run",
+            "--config",
+            str(quickstart_config_path),
+            "--output-dir",
+            str(output_directory),
+        ]
+    )
+    assert exit_code == 0
+    output_text = capsys.readouterr().out
+    assert "Loaded metrics from:" in output_text
+
+
 def test_cli_train_defaults_to_hybrid_when_variant_is_not_provided(tmp_path):
     """If neither CLI nor config specifies a variant, the CLI should use hybrid."""
 

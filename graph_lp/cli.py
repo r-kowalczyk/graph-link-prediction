@@ -348,6 +348,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional embedding variant. If omitted, the config value is used.",
     )
+    # The run subcommand reuses the evaluate implementation, so it must provide the
+    # same attribute on the parsed arguments namespace to avoid runtime failures.
+    run_parser.add_argument(
+        "--run-dir",
+        type=str,
+        default=None,
+        help="Optional explicit run directory to evaluate.",
+    )
     run_parser.set_defaults(handler=_command_run)
 
     return parser
