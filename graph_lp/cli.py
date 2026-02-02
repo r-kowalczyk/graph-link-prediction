@@ -22,16 +22,6 @@ from typing import Any, Callable
 
 import yaml
 
-# The default pipeline uses PyTorch for transformer inference. In environments such
-# as Google Colab, TensorFlow and JAX are often preinstalled and can emit noisy
-# CUDA plugin initialisation logs when Transformers probes optional backends. We
-# disable TensorFlow and Flax integration by default to keep quickstart output
-# clean, while still allowing explicit opt-in for users who want TensorFlow.
-if os.environ.get("GRAPH_LP_ENABLE_TENSORFLOW", "0") != "1":
-    os.environ["TRANSFORMERS_NO_TF"] = "1"
-    os.environ["TRANSFORMERS_NO_FLAX"] = "1"
-    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
-
 from graph_lp import train as training_module
 
 
