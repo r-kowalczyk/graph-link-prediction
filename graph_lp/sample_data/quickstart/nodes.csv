@@ -1,0 +1,13 @@
+id,name,description
+n0,Drug A,Small molecule drug candidate used for quickstart demonstrations
+n1,Drug B,Alternative small molecule drug candidate used for quickstart demonstrations
+n2,Disease X,Example condition used to create labelled link pairs for training
+n3,Disease Y,Second example condition used to create labelled link pairs for training
+n4,Protein P,Example protein entity with a short textual description for embedding
+n5,Protein Q,Second example protein entity with a short textual description for embedding
+n6,Pathway R,Example biological pathway referenced by several labelled pairs
+n7,Gene S,Example gene entity used in both positive and negative label pairs
+n8,Compound T,Example compound entity used to create additional label diversity
+n9,Symptom U,Example symptom entity used to form simple drug symptom links
+n10,Tissue V,Example tissue entity used for a few simple expression style links
+n11,Biomarker W,Example biomarker entity used to create small evaluation subsets

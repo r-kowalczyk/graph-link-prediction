@@ -1,0 +1,56 @@
+# Quickstart configuration that runs on CPU in a few minutes.
+#
+# This configuration uses a tiny bundled CSV dataset so it works on a clean clone
+# without any external data downloads. The default variant is semantic-only to
+# avoid relying on optional PyTorch Geometric extension packages for Node2Vec.
+
+seed: 42
+device: cpu
+variant: semantic
+
+# Output folders are resolved relative to this config file.
+artifacts_dir: ../artifacts_quickstart
+cache_dir: ../artifacts_quickstart/cache
+
+data:
+  dir: ../graph_lp/sample_data/quickstart
+  nodes_csv: nodes.csv
+  edges_csv: edges.csv
+  ground_truth_csv: ground_truth.csv
+  undirected: true
+
+splits:
+  val_ratio: 0.2
+  test_ratio: 0.2
+
+# Structural settings are required for cache keys even in semantic-only mode.
+structural:
+  dim: 8
+  walk_length: 5
+  context_size: 3
+  walks_per_node: 2
+  epochs: 1
+  lr: 0.01
+  batch_size: 32
+
+semantic:
+  # A very small transformer model so the first run finishes quickly on CPU.
+  model_name: prajjwal1/bert-tiny
+  batch_size: 16
+  max_length: 64
+
+features:
+  pair_mode: concat
+
+model:
+  mlp:
+    batch_size: 32
+    search_hidden_dims: [16]
+    search_lrs: [0.001]
+    search_epochs: [1]
+
+metrics:
+  precision_at_k: 5
+
+plots:
+  dpi: 80
