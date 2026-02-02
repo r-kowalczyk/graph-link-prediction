@@ -35,7 +35,7 @@ structural:
 
 semantic:
   # A very small transformer model so the first run finishes quickly on CPU.
-  model_name: bioformers/bioformer-16L
+  model_name: prajjwal1/bert-tiny
   batch_size: 16
   max_length: 64
 

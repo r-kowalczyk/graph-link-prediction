@@ -104,7 +104,19 @@ def transformer_semantic_embeddings(
     """
     import torch
 
+    import logging
+    import os
+
     from transformers import AutoTokenizer, AutoModel
+
+    # We set both libraries to error-only verbosity to keep CLI output readable and stable.
+    # This project only needs the encoder embeddings, so state dict load reports and Hub warnings
+    # about authentication are not useful for this workflow.
+    os.environ["HF_HUB_VERBOSITY"] = "error"
+    os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+    logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+    logging.getLogger("transformers").setLevel(logging.ERROR)
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
     model = AutoModel.from_pretrained(model_name).to(device)
