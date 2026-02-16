@@ -30,6 +30,61 @@ The training command writes a timestamped run folder under `artifacts_quickstart
 - `config_used.yaml` (the exact config text used for the run)
 - `curves/roc.png` and `curves/pr.png` (diagnostic plots)
 
+## GraphSAGE backend
+
+GraphSAGE is available as an alternative backend for binary link prediction on one graph. This backend uses semantic text embeddings as node features and trains a GraphSAGE encoder with a dot-product link decoder.
+
+```bash
+# Train GraphSAGE on the quickstart dataset
+uv run graph-lp train --config configs/quickstart.yaml --model graphsage --device cpu --seed 42
+
+# Evaluate the latest GraphSAGE run metrics
+uv run graph-lp evaluate --config configs/quickstart.yaml --device cpu
+```
+
+The GraphSAGE run writes:
+
+- `graphsage_model_state.pt` (encoder plus decoder weights)
+- `graphsage_metadata.json` (node mappings and serving metadata)
+- `graphsage_node_features.npy` and `graphsage_edge_index.npy` (graph tensors for serving)
+- `metrics.json` and `curves/roc.png`, `curves/pr.png`
+
+## Serving demo
+
+The serving workflow is train, export bundle, then run API.
+
+```bash
+# 1) Train GraphSAGE
+uv run graph-lp train --config configs/quickstart.yaml --model graphsage --device cpu --seed 42
+
+# 2) Export serving bundle from a specific run directory
+uv run graph-lp export --config configs/quickstart.yaml --run-dir artifacts_quickstart/<timestamp>
+
+# 3) Start FastAPI service
+uv run graph-lp serve --bundle-dir artifacts_quickstart/<timestamp>/serving_bundle --host 127.0.0.1 --port 8000
+```
+
+Example requests:
+
+```bash
+# Score a pair of existing entities
+curl -X POST "http://127.0.0.1:8000/predict_link" \
+  -H "Content-Type: application/json" \
+  -d '{"entity_a_name":"Drug A","entity_b_name":"Protein P"}'
+
+# Score an existing entity against a new entity with explicit description text
+curl -X POST "http://127.0.0.1:8000/predict_link" \
+  -H "Content-Type: application/json" \
+  -d '{"entity_a_name":"Novel Kinase K","entity_a_description":"Example kinase associated with tumour signalling","entity_b_name":"Protein P"}'
+
+# Retrieve top-k predicted links for one entity
+curl -X POST "http://127.0.0.1:8000/predict_links" \
+  -H "Content-Type: application/json" \
+  -d '{"entity_name":"Novel Kinase K","entity_description":"Example kinase associated with tumour signalling","top_k":5}'
+```
+
+The API attempts external gene-name enrichment and caches responses on disk. If external lookup does not return description text, provide `entity_description` directly in the request.
+
 ## Dataset
 
 - **Quickstart dataset**: bundled CSV files under `graph_lp/sample_data/quickstart` for a small, runnable demo.
@@ -173,4 +228,6 @@ Test ROC-AUC (LogReg): 0.9296
 
 - This repository is meant to demo an end-to-end link classification pipeline with hybrid embeddings, caching, and reproducible config files.
 - It does not claim to be a production system. It prioritises readability and iteration speed over large-scale training and deployment concerns.
-- Reported AUC values depend on the provided labels, how negative examples were constructed in the ground truth, and the chosen split strategy. This implementation uses a random split of labelled node pairs, which can overestimate performance due to information leakage via shared nodes and neighbourhood structure. While the training graph removes validation and test positive edges before Node2Vec to reduce direct leakage, more stringent strategies (for example node-disjoint or entity and group-based splits) are not implemented.
+- Tasks in this repository are binary link prediction tasks. Predicate types are ignored during training and inference.
+- Reported AUC values depend on the provided labels, how negative examples were constructed in the ground truth, and the chosen split strategy. GraphSAGE uses a random edge split with a fixed seed, which can still leak neighbourhood information through shared nodes.
+- For inductive serving, unseen entities are attached with top-k cosine-similarity edges to existing nodes using semantic embeddings. This is a simple heuristic for demonstration and is not a production graph-construction strategy.
