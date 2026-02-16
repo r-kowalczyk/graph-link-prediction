@@ -46,12 +46,25 @@ features:
   scaler: standard
 
 model:
+  backend: baseline
   type: logreg
   mlp:
     batch_size: 256
     search_hidden_dims: [128, 256]
     search_lrs: [0.001, 0.0005]
     search_epochs: [5, 10]
+
+graphsage:
+  hidden_dim: 256
+  output_dim: 128
+  dropout: 0.2
+  learning_rate: 0.001
+  epochs: 20
+  batch_size: 512
+  num_neighbors: [25, 10]
+  negative_sampling_ratio: 1.0
+  attachment_top_k: 5
+  attachment_seed: 42
 
 metrics:
   precision_at_k: 10

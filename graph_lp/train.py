@@ -25,6 +25,7 @@ from .embeddings import (
 from .features import fuse_embeddings, pair_features
 from .models import LogRegModel, hyperparam_search_mlp
 from .eval import compute_and_plot, cold_start_mask
+from .graphsage import build_graph_data, train_graphsage_model
 from .utils import (
     resolve_device,
     set_all_seeds,
@@ -47,6 +48,28 @@ def parse_args() -> argparse.Namespace:
         default="hybrid",
     )
     return p.parse_args()
+
+
+def _resolve_edge_column_names(edges_table) -> tuple[str, str]:
+    """Resolve supported edge endpoint column names from an edges table.
+
+    The project historically used ``subject`` and ``object`` columns, while some
+    datasets use ``start_id`` and ``end_id``. Resolving this in one place keeps
+    both baseline and GraphSAGE paths consistent without hard-coded assumptions.
+
+    Parameters:
+        edges_table: Pandas DataFrame containing the edges input table.
+
+    Returns:
+        A tuple containing the source and target column names.
+    """
+    if {"subject", "object"}.issubset(edges_table.columns):
+        return "subject", "object"
+    if {"start_id", "end_id"}.issubset(edges_table.columns):
+        return "start_id", "end_id"
+    raise ValueError(
+        "Edges CSV must contain either subject/object or start_id/end_id columns."
+    )
 
 
 def run(cfg: Dict, variant: str) -> Dict:
@@ -78,7 +101,117 @@ def run(cfg: Dict, variant: str) -> Dict:
         cfg["data"]["edges_csv"],
         cfg["data"]["ground_truth_csv"],
     )
-    node_idx, _, node_texts = build_node_index(nodes)
+    node_idx, idx2node, node_texts = build_node_index(nodes)
+    model_configuration = cfg.get("model", {})
+    model_backend = str(model_configuration.get("backend", "baseline")).lower()
+
+    edge_source_column_name, edge_target_column_name = _resolve_edge_column_names(edges)
+    edge_rows = edges.copy()
+    edge_rows[edge_source_column_name] = edge_rows[edge_source_column_name].astype(str)
+    edge_rows[edge_target_column_name] = edge_rows[edge_target_column_name].astype(str)
+    edge_idx = [
+        (node_idx[source_node_id], node_idx[target_node_id])
+        for source_node_id, target_node_id in edge_rows[
+            [edge_source_column_name, edge_target_column_name]
+        ].values
+    ]
+
+    if model_backend == "graphsage":
+        print("Step 2/5: preparing semantic features for GraphSAGE...", flush=True)
+        nodes_csv_path = os.path.join(cfg["data"]["dir"], cfg["data"]["nodes_csv"])
+        edges_csv_path = os.path.join(cfg["data"]["dir"], cfg["data"]["edges_csv"])
+        gt_csv_path = os.path.join(cfg["data"]["dir"], cfg["data"]["ground_truth_csv"])
+        cache_dir = cfg["cache_dir"]
+        ensure_dir(cache_dir)
+        cache_key = cache_key_from_paths_and_config(
+            (nodes_csv_path, edges_csv_path, gt_csv_path),
+            {
+                "backend": "graphsage",
+                "sem_model": cfg["semantic"]["model_name"],
+                "sem_bs": cfg["semantic"]["batch_size"],
+                "sem_max_len": cfg["semantic"]["max_length"],
+                "graphsage": cfg.get("graphsage", {}),
+            },
+        )
+        semantic_path = os.path.join(cache_dir, f"semantic_graphsage_{cache_key}.npy")
+        if os.path.exists(semantic_path):
+            print("Step 3/5: loading cached semantic embeddings...", flush=True)
+            semantic = np.load(semantic_path)
+        else:
+            print(
+                "Step 3/5: computing semantic embeddings for GraphSAGE node features...",
+                flush=True,
+            )
+            semantic = transformer_semantic_embeddings(
+                node_texts,
+                str(cfg["semantic"]["model_name"]),
+                int(cfg["semantic"]["batch_size"]),
+                int(cfg["semantic"]["max_length"]),
+                str(device),
+            )
+            np.save(semantic_path, semantic)
+
+        print("Step 4/5: building graph and training GraphSAGE...", flush=True)
+        graph_data = build_graph_data(
+            node_feature_matrix=semantic,
+            edge_pairs=edge_idx,
+            is_undirected=bool(cfg["data"]["undirected"]),
+        )
+        node_display_name_by_id = {
+            str(row["id"]): str(row.get("name", row["id"]))
+            for _, row in nodes.iterrows()
+        }
+        node_name_to_id = {
+            node_name: node_identifier
+            for node_identifier, node_name in node_display_name_by_id.items()
+            if node_name
+        }
+        ensure_dir(cfg["artifacts_dir"])
+        run_dir = os.path.join(cfg["artifacts_dir"], time_stamp())
+        ensure_dir(run_dir)
+
+        graphsage_cfg = dict(cfg)
+        graphsage_cfg["device"] = str(device)
+        out = train_graphsage_model(
+            graph_data=graph_data,
+            run_directory=run_dir,
+            configuration=graphsage_cfg,
+            node_id_to_index=node_idx,
+            index_to_node_id=idx2node,
+            node_name_to_id=node_name_to_id,
+            node_display_name_by_id=node_display_name_by_id,
+        )
+        write_json(os.path.join(run_dir, "metrics.json"), out)
+        cfg_text = cfg.get("_config_text") if isinstance(cfg, dict) else None
+        if isinstance(cfg_text, str) and cfg_text:
+            save_yaml_copy(os.path.join(run_dir, "config_used.yaml"), cfg_text)
+        else:
+            try:
+                import yaml as _yaml
+
+                save_yaml_copy(
+                    os.path.join(run_dir, "config_used.yaml"), _yaml.safe_dump(cfg)
+                )
+            except Exception:
+                pass
+
+        print("Step 5/5: GraphSAGE run artefacts saved.", flush=True)
+        print(f"Run complete. Artefacts are in: {run_dir}", flush=True)
+        print(
+            "\n".join(
+                [
+                    "",
+                    "--- Run summary ---",
+                    "  Backend: graphsage",
+                    f"  Semantic embedding model: {cfg['semantic']['model_name']}",
+                    f"  Test ROC-AUC (GraphSAGE): {out.get('test', {}).get('roc_auc', 'N/A')}",
+                    f"  Test PR-AUC (GraphSAGE): {out.get('test', {}).get('pr_auc', 'N/A')}",
+                    "---",
+                ]
+            ),
+            flush=True,
+        )
+        return out
 
     print("Step 2/9: preparing graph and label splits...", flush=True)
     # Prepare pairs and labels (prefer notebook columns: source,target,y)
@@ -97,10 +230,6 @@ def run(cfg: Dict, variant: str) -> Dict:
     labels = np.array([1] * len(pos_pairs) + [0] * len(neg_pairs), dtype=int)
 
     # Build graph from edges; later we remove validation/test positives to avoid leakage
-    e = edges.copy()
-    e["subject"] = e["subject"].astype(str)
-    e["object"] = e["object"].astype(str)
-    edge_idx = [(node_idx[s], node_idx[t]) for s, t in e[["subject", "object"]].values]
     g_full = build_graph(
         edge_idx, num_nodes=len(node_idx), undirected=bool(cfg["data"]["undirected"])
     )

@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from graph_lp.train import parse_args, run
+from graph_lp.train import _resolve_edge_column_names, parse_args, run
 
 
 def create_minimal_test_data(tmp_path):
@@ -428,3 +428,205 @@ def test_main_reads_config_and_calls_run(tmp_path):
     assert called_variant == "semantic"
     assert isinstance(called_cfg, dict)
     assert called_cfg["_config_text"] == cfg_text
+
+
+def test_resolve_edge_column_names_supports_both_known_schemas():
+    """Edge column resolver should support historical and alternate schemas."""
+
+    import pandas as pd
+
+    subject_object = pd.DataFrame({"subject": ["a"], "object": ["b"]})
+    start_end = pd.DataFrame({"start_id": ["a"], "end_id": ["b"]})
+    assert _resolve_edge_column_names(subject_object) == ("subject", "object")
+    assert _resolve_edge_column_names(start_end) == ("start_id", "end_id")
+
+
+def test_resolve_edge_column_names_rejects_unknown_schema():
+    """Unknown edge schema should produce a clear ValueError."""
+
+    import pandas as pd
+
+    with np.testing.assert_raises(ValueError):
+        _resolve_edge_column_names(pd.DataFrame({"a": [1], "b": [2]}))
+
+
+@patch("graph_lp.train.train_graphsage_model")
+@patch("graph_lp.train.transformer_semantic_embeddings")
+def test_run_graphsage_backend_computes_semantic_embeddings(
+    mock_semantic, mock_train_graphsage, tmp_path
+):
+    """GraphSAGE backend should compute semantic features and return metrics."""
+
+    data_dir = create_minimal_test_data(tmp_path)
+    artifacts_dir = tmp_path / "artifacts"
+    cache_dir = tmp_path / "cache"
+    artifacts_dir.mkdir()
+    cache_dir.mkdir()
+    mock_semantic.return_value = np.random.randn(4, 8).astype(np.float32)
+    mock_train_graphsage.return_value = {
+        "backend": "graphsage",
+        "test": {"roc_auc": 0.9, "pr_auc": 0.8},
+    }
+    cfg = {
+        "seed": 42,
+        "device": "cpu",
+        "data": {
+            "dir": data_dir,
+            "nodes_csv": "nodes.csv",
+            "edges_csv": "edges.csv",
+            "ground_truth_csv": "ground_truth.csv",
+            "undirected": True,
+        },
+        "splits": {"val_ratio": 0.2, "test_ratio": 0.2},
+        "semantic": {
+            "model_name": "test-model",
+            "batch_size": 4,
+            "max_length": 32,
+        },
+        "graphsage": {"epochs": 1, "batch_size": 2},
+        "metrics": {"precision_at_k": 2},
+        "plots": {"dpi": 80},
+        "model": {"backend": "graphsage", "mlp": {"batch_size": 4}},
+        "structural": {
+            "dim": 8,
+            "walk_length": 5,
+            "context_size": 3,
+            "walks_per_node": 2,
+            "epochs": 1,
+            "lr": 0.01,
+            "batch_size": 32,
+        },
+        "features": {"pair_mode": "concat"},
+        "artifacts_dir": str(artifacts_dir),
+        "cache_dir": str(cache_dir),
+        "_config_text": "test: config",
+    }
+    results = run(cfg, "semantic")
+    assert results["backend"] == "graphsage"
+    mock_semantic.assert_called_once()
+    mock_train_graphsage.assert_called_once()
+    run_dir = next(iter(artifacts_dir.iterdir()))
+    assert (run_dir / "metrics.json").exists()
+    assert (run_dir / "config_used.yaml").exists()
+
+
+@patch("graph_lp.train.train_graphsage_model")
+@patch("graph_lp.train.transformer_semantic_embeddings")
+def test_run_graphsage_backend_uses_cached_semantic_embeddings(
+    mock_semantic, mock_train_graphsage, tmp_path
+):
+    """GraphSAGE backend should load cached semantic features when present."""
+
+    data_dir = create_minimal_test_data(tmp_path)
+    artifacts_dir = tmp_path / "artifacts"
+    cache_dir = tmp_path / "cache"
+    artifacts_dir.mkdir()
+    cache_dir.mkdir()
+    cache_key = "cached_key"
+    np.save(
+        cache_dir / f"semantic_graphsage_{cache_key}.npy",
+        np.ones((4, 8), dtype=np.float32),
+    )
+    mock_train_graphsage.return_value = {
+        "backend": "graphsage",
+        "test": {"roc_auc": 0.7, "pr_auc": 0.6},
+    }
+    cfg = {
+        "seed": 42,
+        "device": "cpu",
+        "data": {
+            "dir": data_dir,
+            "nodes_csv": "nodes.csv",
+            "edges_csv": "edges.csv",
+            "ground_truth_csv": "ground_truth.csv",
+            "undirected": True,
+        },
+        "splits": {"val_ratio": 0.2, "test_ratio": 0.2},
+        "semantic": {
+            "model_name": "test-model",
+            "batch_size": 4,
+            "max_length": 32,
+        },
+        "graphsage": {"epochs": 1, "batch_size": 2},
+        "metrics": {"precision_at_k": 2},
+        "plots": {"dpi": 80},
+        "model": {"backend": "graphsage", "mlp": {"batch_size": 4}},
+        "structural": {
+            "dim": 8,
+            "walk_length": 5,
+            "context_size": 3,
+            "walks_per_node": 2,
+            "epochs": 1,
+            "lr": 0.01,
+            "batch_size": 32,
+        },
+        "features": {"pair_mode": "concat"},
+        "artifacts_dir": str(artifacts_dir),
+        "cache_dir": str(cache_dir),
+    }
+    with patch(
+        "graph_lp.train.cache_key_from_paths_and_config", return_value=cache_key
+    ):
+        results = run(cfg, "semantic")
+    assert results["backend"] == "graphsage"
+    mock_semantic.assert_not_called()
+    mock_train_graphsage.assert_called_once()
+
+
+@patch("graph_lp.train.train_graphsage_model")
+@patch("graph_lp.train.transformer_semantic_embeddings")
+def test_run_graphsage_handles_yaml_dump_failure_when_saving_config(
+    mock_semantic, mock_train_graphsage, tmp_path
+):
+    """GraphSAGE path should not fail when YAML serialisation raises an error."""
+
+    data_dir = create_minimal_test_data(tmp_path)
+    artifacts_dir = tmp_path / "artifacts"
+    cache_dir = tmp_path / "cache"
+    artifacts_dir.mkdir()
+    cache_dir.mkdir()
+    mock_semantic.return_value = np.random.randn(4, 8).astype(np.float32)
+    mock_train_graphsage.return_value = {
+        "backend": "graphsage",
+        "test": {"roc_auc": 0.7, "pr_auc": 0.6},
+    }
+    cfg = {
+        "seed": 42,
+        "device": "cpu",
+        "data": {
+            "dir": data_dir,
+            "nodes_csv": "nodes.csv",
+            "edges_csv": "edges.csv",
+            "ground_truth_csv": "ground_truth.csv",
+            "undirected": True,
+        },
+        "splits": {"val_ratio": 0.2, "test_ratio": 0.2},
+        "semantic": {
+            "model_name": "test-model",
+            "batch_size": 4,
+            "max_length": 32,
+        },
+        "graphsage": {"epochs": 1, "batch_size": 2},
+        "metrics": {"precision_at_k": 2},
+        "plots": {"dpi": 80},
+        "model": {"backend": "graphsage", "mlp": {"batch_size": 4}},
+        "structural": {
+            "dim": 8,
+            "walk_length": 5,
+            "context_size": 3,
+            "walks_per_node": 2,
+            "epochs": 1,
+            "lr": 0.01,
+            "batch_size": 32,
+        },
+        "features": {"pair_mode": "concat"},
+        "artifacts_dir": str(artifacts_dir),
+        "cache_dir": str(cache_dir),
+    }
+
+    with patch("graph_lp.train.yaml.safe_dump", side_effect=RuntimeError("yaml error")):
+        results = run(cfg, "semantic")
+    assert results["backend"] == "graphsage"
+    run_dir = next(iter(artifacts_dir.iterdir()))
+    assert (run_dir / "metrics.json").exists()
+    assert not (run_dir / "config_used.yaml").exists()
