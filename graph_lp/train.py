@@ -351,6 +351,32 @@ def run(cfg: Dict, variant: str) -> Dict:
         except Exception:
             pass
     print(f"Run complete. Artefacts are in: {run_dir}", flush=True)
+
+    # Print a human-readable summary of the run configuration and best model
+    # parameters so the user can see key results directly in the terminal or
+    # notebook output without opening metrics.json.
+    summary_lines = [
+        "",
+        "--- Run summary ---",
+        f"  Variant: {variant}",
+    ]
+    if variant in ("semantic", "hybrid"):
+        summary_lines.append(
+            f"  Semantic embedding model: {cfg['semantic']['model_name']}"
+        )
+    summary_lines.extend(
+        [
+            f"  Best MLP hidden dim: {int(best_conf[0])}",
+            f"  Best MLP learning rate: {float(best_conf[1])}",
+            f"  Best MLP epochs: {int(best_conf[2])}",
+            f"  Best MLP validation AUC: {float(best_val_auc):.4f}",
+            f"  Test ROC-AUC (MLP): {m_test_mlp.get('roc_auc', 'N/A')}",
+            f"  Test ROC-AUC (LogReg): {m_test_lr.get('roc_auc', 'N/A')}",
+            "---",
+        ]
+    )
+    print("\n".join(summary_lines), flush=True)
+
     return out
 
 
