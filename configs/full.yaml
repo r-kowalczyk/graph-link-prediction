@@ -30,14 +30,15 @@ structural:
   batch_size: 128
 
 semantic:
-  model_name: bioformers/bioformer-16L
+  model_name: sultan/BioM-BERT-PubMed-PMC-Large
   batch_size: 128
   max_length: 128
 
 # Other language models that have been tested:
-# - sultan/BioM-BERT-PubMed-PMC-Large
 # - michiyasunaga/BioLinkBERT-large
 # - dmis-lab/biobert-v1.1
+# - bioformers/bioformer-16L
+
 
 features:
   pair_mode: concat
