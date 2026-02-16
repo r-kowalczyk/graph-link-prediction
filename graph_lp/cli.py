@@ -219,6 +219,13 @@ def _command_train(arguments: argparse.Namespace) -> int:
         device_override=arguments.device,
         output_directory_override=arguments.output_dir,
     )
+
+    # Allow the semantic embedding model to be overridden from the command line
+    # so users can experiment with different transformer models without editing
+    # the configuration file each time.
+    if arguments.model is not None:
+        prepared_configuration["semantic"]["model_name"] = arguments.model
+
     variant_from_config = prepared_configuration.get("variant")
     variant = str(arguments.variant or variant_from_config or "hybrid")
     training_module.run(prepared_configuration, variant)
@@ -324,6 +331,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional embedding variant. If omitted, the config value is used.",
     )
+    train_parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Optional Hugging Face model identifier for semantic embeddings, "
+        "for example 'sultan/BioM-BERT-PubMed-PMC-Large'. Overrides "
+        "the semantic.model_name value in the configuration file.",
+    )
     train_parser.set_defaults(handler=_command_train)
 
     evaluate_parser = subparsers.add_parser(
@@ -347,6 +362,14 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["structural", "semantic", "hybrid"],
         default=None,
         help="Optional embedding variant. If omitted, the config value is used.",
+    )
+    run_parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Optional Hugging Face model identifier for semantic embeddings, "
+        "for example 'sultan/BioM-BERT-PubMed-PMC-Large'. Overrides "
+        "the semantic.model_name value in the configuration file.",
     )
     # The run subcommand reuses the evaluate implementation, so it must provide the
     # same attribute on the parsed arguments namespace to avoid runtime failures.

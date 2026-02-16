@@ -386,6 +386,81 @@ def test_cli_main_returns_zero_for_help():
     assert exit_code == 0
 
 
+def test_cli_train_model_flag_overrides_semantic_model_name(tmp_path):
+    """The --model flag should override the semantic.model_name from the config.
+
+    This test passes a custom model identifier via the --model CLI argument
+    and verifies that the training pipeline receives the overridden value
+    rather than the default from the configuration file.
+    """
+
+    dataset_directory = tmp_path / "dataset"
+    _create_minimal_csv_dataset(dataset_directory)
+
+    config_path = tmp_path / "config.json"
+    config_payload = {
+        "seed": 42,
+        "device": "cpu",
+        "variant": "semantic",
+        "artifacts_dir": "artifacts",
+        "cache_dir": "cache",
+        "data": {
+            "dir": "dataset",
+            "nodes_csv": "nodes.csv",
+            "edges_csv": "edges.csv",
+            "ground_truth_csv": "ground_truth.csv",
+            "undirected": True,
+        },
+        "splits": {"val_ratio": 0.2, "test_ratio": 0.2},
+        "structural": {
+            "dim": 8,
+            "walk_length": 5,
+            "context_size": 3,
+            "walks_per_node": 2,
+            "epochs": 1,
+            "lr": 0.01,
+            "batch_size": 32,
+        },
+        "semantic": {"model_name": "original-model", "batch_size": 4, "max_length": 64},
+        "features": {"pair_mode": "concat"},
+        "metrics": {"precision_at_k": 2},
+        "plots": {"dpi": 80},
+        "model": {
+            "mlp": {
+                "batch_size": 4,
+                "search_hidden_dims": [8],
+                "search_lrs": [0.01],
+                "search_epochs": [1],
+            }
+        },
+    }
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+
+    # Capture the configuration dictionary that the training pipeline receives
+    # so we can assert that the semantic model name was overridden by --model.
+    captured_configurations: list[dict] = []
+
+    def capture_run(configuration, _variant):
+        captured_configurations.append(configuration)
+
+    with patch("graph_lp.train.run", side_effect=capture_run):
+        exit_code = cli.main(
+            [
+                "train",
+                "--config",
+                str(config_path),
+                "--model",
+                "custom/override-model",
+            ]
+        )
+
+    assert exit_code == 0
+    assert len(captured_configurations) == 1
+    assert (
+        captured_configurations[0]["semantic"]["model_name"] == "custom/override-model"
+    )
+
+
 def test_cli_returns_error_code_when_config_top_level_is_not_a_mapping(
     tmp_path, capsys
 ):
