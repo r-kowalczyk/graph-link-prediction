@@ -34,6 +34,11 @@ semantic:
   batch_size: 128
   max_length: 128
 
+# Other language models that have been tested:
+# - sultan/BioM-BERT-PubMed-PMC-Large
+# - michiyasunaga/BioLinkBERT-large
+# - dmis-lab/biobert-v1.1
+
 features:
   pair_mode: concat
   order_invariant: true
