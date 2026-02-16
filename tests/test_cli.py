@@ -472,3 +472,171 @@ def test_cli_returns_error_code_when_config_top_level_is_not_a_mapping(
     assert exit_code == 2
     error_text = capsys.readouterr().err
     assert "top level" in error_text
+
+
+def test_cli_train_model_graphsage_sets_graphsage_backend(tmp_path):
+    """The --model graphsage value should select the GraphSAGE backend."""
+
+    dataset_directory = tmp_path / "dataset"
+    _create_minimal_csv_dataset(dataset_directory)
+
+    config_path = tmp_path / "config.json"
+    config_payload = {
+        "seed": 42,
+        "device": "cpu",
+        "variant": "semantic",
+        "artifacts_dir": "artifacts",
+        "cache_dir": "cache",
+        "data": {
+            "dir": "dataset",
+            "nodes_csv": "nodes.csv",
+            "edges_csv": "edges.csv",
+            "ground_truth_csv": "ground_truth.csv",
+            "undirected": True,
+        },
+        "splits": {"val_ratio": 0.2, "test_ratio": 0.2},
+        "structural": {
+            "dim": 8,
+            "walk_length": 5,
+            "context_size": 3,
+            "walks_per_node": 2,
+            "epochs": 1,
+            "lr": 0.01,
+            "batch_size": 32,
+        },
+        "semantic": {"model_name": "original-model", "batch_size": 4, "max_length": 64},
+        "features": {"pair_mode": "concat"},
+        "metrics": {"precision_at_k": 2},
+        "plots": {"dpi": 80},
+        "model": {
+            "mlp": {
+                "batch_size": 4,
+                "search_hidden_dims": [8],
+                "search_lrs": [0.01],
+                "search_epochs": [1],
+            }
+        },
+    }
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+
+    captured_configurations: list[dict] = []
+
+    def capture_run(configuration, _variant):
+        captured_configurations.append(configuration)
+
+    with patch("graph_lp.train.run", side_effect=capture_run):
+        exit_code = cli.main(
+            ["train", "--config", str(config_path), "--model", "graphsage"]
+        )
+
+    assert exit_code == 0
+    assert len(captured_configurations) == 1
+    assert captured_configurations[0]["model"]["backend"] == "graphsage"
+
+
+def test_cli_export_uses_latest_run_directory_and_prints_bundle_path(
+    tmp_path, monkeypatch, capsys
+):
+    """The export command should resolve run directory and print bundle output."""
+
+    repository_root = Path(__file__).resolve().parents[1]
+    quickstart_config_path = repository_root / "configs" / "quickstart.yaml"
+    latest_run_directory = tmp_path / "20200101-000000"
+    latest_run_directory.mkdir(parents=True, exist_ok=True)
+
+    captured_call: dict[str, str] = {}
+
+    def fake_export_graphsage_bundle(run_directory, bundle_directory_name):
+        captured_call["run_directory"] = run_directory
+        captured_call["bundle_directory_name"] = bundle_directory_name
+        return str(Path(run_directory) / bundle_directory_name)
+
+    monkeypatch.setattr(
+        cli,
+        "_find_latest_run_directory",
+        lambda _artifacts_directory: str(latest_run_directory),
+    )
+    monkeypatch.setattr(
+        "graph_lp.graphsage.export_graphsage_bundle",
+        fake_export_graphsage_bundle,
+    )
+
+    exit_code = cli.main(
+        [
+            "export",
+            "--config",
+            str(quickstart_config_path),
+            "--bundle-dir-name",
+            "bundle_test",
+        ]
+    )
+    assert exit_code == 0
+    assert captured_call["run_directory"] == str(latest_run_directory)
+    assert captured_call["bundle_directory_name"] == "bundle_test"
+    output_text = capsys.readouterr().out
+    assert "Exported GraphSAGE serving bundle" in output_text
+
+
+def test_cli_serve_calls_server_runner(monkeypatch, tmp_path):
+    """The serve command should call the server runner with parsed arguments."""
+
+    captured_call: dict[str, object] = {}
+
+    def fake_run_server(bundle_directory, host, port):
+        captured_call["bundle_directory"] = bundle_directory
+        captured_call["host"] = host
+        captured_call["port"] = port
+
+    monkeypatch.setattr("graph_lp.server.run_server", fake_run_server)
+    exit_code = cli.main(
+        [
+            "serve",
+            "--bundle-dir",
+            str(tmp_path),
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "9000",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured_call == {
+        "bundle_directory": str(tmp_path),
+        "host": "0.0.0.0",
+        "port": 9000,
+    }
+
+
+def test_cli_export_supports_explicit_run_directory(tmp_path, monkeypatch):
+    """The export command should use --run-dir when it is provided."""
+
+    repository_root = Path(__file__).resolve().parents[1]
+    quickstart_config_path = repository_root / "configs" / "quickstart.yaml"
+    explicit_run_directory = tmp_path / "manual_run"
+    explicit_run_directory.mkdir(parents=True, exist_ok=True)
+
+    captured_call: dict[str, str] = {}
+
+    def fake_export_graphsage_bundle(run_directory, bundle_directory_name):
+        captured_call["run_directory"] = run_directory
+        captured_call["bundle_directory_name"] = bundle_directory_name
+        return str(Path(run_directory) / bundle_directory_name)
+
+    monkeypatch.setattr(
+        "graph_lp.graphsage.export_graphsage_bundle",
+        fake_export_graphsage_bundle,
+    )
+    exit_code = cli.main(
+        [
+            "export",
+            "--config",
+            str(quickstart_config_path),
+            "--run-dir",
+            str(explicit_run_directory),
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured_call["run_directory"] == str(explicit_run_directory.resolve())
+    assert captured_call["bundle_directory_name"] == "serving_bundle"

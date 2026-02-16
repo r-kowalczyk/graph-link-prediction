@@ -220,11 +220,14 @@ def _command_train(arguments: argparse.Namespace) -> int:
         output_directory_override=arguments.output_dir,
     )
 
-    # Allow the semantic embedding model to be overridden from the command line
-    # so users can experiment with different transformer models without editing
-    # the configuration file each time.
+    # The model flag keeps backward compatibility for semantic model overrides
+    # while also allowing explicit backend selection with "--model graphsage".
     if arguments.model is not None:
-        prepared_configuration["semantic"]["model_name"] = arguments.model
+        if str(arguments.model).lower() in {"graphsage", "baseline"}:
+            prepared_configuration.setdefault("model", {})
+            prepared_configuration["model"]["backend"] = str(arguments.model).lower()
+        else:
+            prepared_configuration["semantic"]["model_name"] = arguments.model
 
     variant_from_config = prepared_configuration.get("variant")
     variant = str(arguments.variant or variant_from_config or "hybrid")
@@ -287,6 +290,57 @@ def _command_run(arguments: argparse.Namespace) -> int:
     return _command_evaluate(arguments)
 
 
+def _command_export(arguments: argparse.Namespace) -> int:
+    """Handle the ``export`` subcommand by creating a serving bundle.
+
+    The export command reads GraphSAGE artefacts from a completed run directory
+    and copies them to a dedicated serving bundle folder with stable file names.
+    This keeps API startup independent from training internals and cache files.
+    """
+    from graph_lp.graphsage import export_graphsage_bundle
+
+    configuration, configuration_text = _load_configuration(arguments.config)
+    _validate_training_configuration(configuration)
+    prepared_configuration = _prepare_configuration_for_run(
+        configuration=configuration,
+        configuration_text=configuration_text,
+        config_path=arguments.config,
+        seed_override=arguments.seed,
+        device_override=arguments.device,
+        output_directory_override=arguments.output_dir,
+    )
+    if arguments.run_dir is not None:
+        run_directory = os.path.abspath(arguments.run_dir)
+    else:
+        run_directory = _find_latest_run_directory(
+            str(prepared_configuration["artifacts_dir"])
+        )
+
+    bundle_directory = export_graphsage_bundle(
+        run_directory=run_directory,
+        bundle_directory_name=str(arguments.bundle_dir_name),
+    )
+    print(f"Exported GraphSAGE serving bundle: {bundle_directory}")
+    return 0
+
+
+def _command_serve(arguments: argparse.Namespace) -> int:
+    """Handle the ``serve`` subcommand by starting the FastAPI server.
+
+    The server command loads a previously exported GraphSAGE serving bundle and
+    starts an HTTP API process for link scoring. Training is not run in this
+    command, so startup remains fast and deterministic for inference demos.
+    """
+    from graph_lp.server import run_server
+
+    run_server(
+        bundle_directory=str(arguments.bundle_dir),
+        host=str(arguments.host),
+        port=int(arguments.port),
+    )
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Create the top-level argument parser with subcommands.
 
@@ -335,9 +389,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--model",
         type=str,
         default=None,
-        help="Optional Hugging Face model identifier for semantic embeddings, "
-        "for example 'sultan/BioM-BERT-PubMed-PMC-Large'. Overrides "
-        "the semantic.model_name value in the configuration file.",
+        help="Optional model selector. Use 'graphsage' or 'baseline' for backend "
+        "selection, or pass a Hugging Face identifier such as "
+        "'sultan/BioM-BERT-PubMed-PMC-Large' to override semantic.model_name.",
     )
     train_parser.set_defaults(handler=_command_train)
 
@@ -367,9 +421,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--model",
         type=str,
         default=None,
-        help="Optional Hugging Face model identifier for semantic embeddings, "
-        "for example 'sultan/BioM-BERT-PubMed-PMC-Large'. Overrides "
-        "the semantic.model_name value in the configuration file.",
+        help="Optional model selector. Use 'graphsage' or 'baseline' for backend "
+        "selection, or pass a Hugging Face identifier such as "
+        "'sultan/BioM-BERT-PubMed-PMC-Large' to override semantic.model_name.",
     )
     # The run subcommand reuses the evaluate implementation, so it must provide the
     # same attribute on the parsed arguments namespace to avoid runtime failures.
@@ -380,6 +434,47 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional explicit run directory to evaluate.",
     )
     run_parser.set_defaults(handler=_command_run)
+
+    export_parser = subparsers.add_parser(
+        "export", help="Export a GraphSAGE serving bundle from a completed run."
+    )
+    add_common_options(export_parser)
+    export_parser.add_argument(
+        "--run-dir",
+        type=str,
+        default=None,
+        help="Optional explicit run directory to export from.",
+    )
+    export_parser.add_argument(
+        "--bundle-dir-name",
+        type=str,
+        default="serving_bundle",
+        help="Name of the bundle directory created under the run folder.",
+    )
+    export_parser.set_defaults(handler=_command_export)
+
+    serve_parser = subparsers.add_parser(
+        "serve", help="Run FastAPI serving from an exported GraphSAGE bundle."
+    )
+    serve_parser.add_argument(
+        "--bundle-dir",
+        required=True,
+        type=str,
+        help="Path to an exported serving bundle directory.",
+    )
+    serve_parser.add_argument(
+        "--host",
+        type=str,
+        default="127.0.0.1",
+        help="Host interface for the HTTP server.",
+    )
+    serve_parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port for the HTTP server.",
+    )
+    serve_parser.set_defaults(handler=_command_serve)
 
     return parser
 
