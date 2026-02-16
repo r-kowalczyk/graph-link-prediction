@@ -11,7 +11,7 @@ authors = [
   { name = "Radoslaw Kowalczyk", email = "r.kowalczyk@outlook.com" }
 ]
 license = { file = "LICENSE" }
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
   "numpy>=1.24",
   "pandas>=2.0",
@@ -47,7 +47,7 @@ packages = ["graph_lp"]
 extend-exclude = ["notebooks/**"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 ignore_missing_imports = true
 follow_imports = "skip"
 warn_unused_ignores = false

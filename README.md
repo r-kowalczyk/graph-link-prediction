@@ -1,7 +1,7 @@
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/r-kowalczyk/graph-link-prediction/blob/main/notebooks/colab_runner.ipynb)
 
 
-# ```Graph Link Prediction```
+# Graph Link Prediction
 
 # Quickstart
 
@@ -9,7 +9,7 @@ This quickstart runs start to finish on CPU using a tiny bundled CSV dataset. Th
 
 ## Commands
 
-Prerequisites: Python 3.11+ and `uv` installed (see [uv installation instructions](https://docs.astral.sh/uv/)).
+Prerequisites: Python 3.12+ and `uv` installed (see [uv installation instructions](https://docs.astral.sh/uv/)).
 
 ```bash
 # Create the environment (installs the project in editable mode)
