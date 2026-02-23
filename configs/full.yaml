@@ -55,16 +55,16 @@ model:
     search_epochs: [5, 10]
 
 graphsage:
-  hidden_dim: 256
-  output_dim: 128
-  dropout: 0.2
-  learning_rate: 0.001
-  epochs: 50
+  hidden_dim: 128
+  output_dim: 64
+  dropout: 0.4
+  learning_rate: 0.0005
+  epochs: 80
   batch_size: 512
   num_neighbors: [25, 10]
-  negative_sampling_ratio: 1.0
+  negative_sampling_ratio: 3.0
   decoder_type: mlp
-  decoder_hidden_dim: 128
+  decoder_hidden_dim: 64
   attachment_top_k: 5
   attachment_seed: 42
 
