@@ -1,6 +1,3 @@
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/r-kowalczyk/graph-link-prediction/blob/main/notebooks/colab_runner.ipynb)
-
-
 # Graph Link Prediction
 
 # Quickstart
@@ -30,61 +27,6 @@ The training command writes a timestamped run folder under `artifacts_quickstart
 - `config_used.yaml` (the exact config text used for the run)
 - `curves/roc.png` and `curves/pr.png` (diagnostic plots)
 
-## GraphSAGE backend
-
-GraphSAGE is available as an alternative backend for binary link prediction on one graph. This backend uses semantic text embeddings as node features and trains a GraphSAGE encoder with a dot-product link decoder.
-
-```bash
-# Train GraphSAGE on the quickstart dataset
-uv run graph-lp train --config configs/quickstart.yaml --model graphsage --device cpu --seed 42
-
-# Evaluate the latest GraphSAGE run metrics
-uv run graph-lp evaluate --config configs/quickstart.yaml --device cpu
-```
-
-The GraphSAGE run writes:
-
-- `graphsage_model_state.pt` (encoder plus decoder weights)
-- `graphsage_metadata.json` (node mappings and serving metadata)
-- `graphsage_node_features.npy` and `graphsage_edge_index.npy` (graph tensors for serving)
-- `metrics.json` and `curves/roc.png`, `curves/pr.png`
-
-## Serving demo
-
-The serving workflow is train, export bundle, then run API.
-
-```bash
-# 1) Train GraphSAGE
-uv run graph-lp train --config configs/quickstart.yaml --model graphsage --device cpu --seed 42
-
-# 2) Export serving bundle from a specific run directory
-uv run graph-lp export --config configs/quickstart.yaml --run-dir artifacts_quickstart/<timestamp>
-
-# 3) Start FastAPI service
-uv run graph-lp serve --bundle-dir artifacts_quickstart/<timestamp>/serving_bundle --host 127.0.0.1 --port 8000
-```
-
-Example requests:
-
-```bash
-# Score a pair of existing entities
-curl -X POST "http://127.0.0.1:8000/predict_link" \
-  -H "Content-Type: application/json" \
-  -d '{"entity_a_name":"Drug A","entity_b_name":"Protein P"}'
-
-# Score an existing entity against a new entity with explicit description text
-curl -X POST "http://127.0.0.1:8000/predict_link" \
-  -H "Content-Type: application/json" \
-  -d '{"entity_a_name":"Novel Kinase K","entity_a_description":"Example kinase associated with tumour signalling","entity_b_name":"Protein P"}'
-
-# Retrieve top-k predicted links for one entity
-curl -X POST "http://127.0.0.1:8000/predict_links" \
-  -H "Content-Type: application/json" \
-  -d '{"entity_name":"Novel Kinase K","entity_description":"Example kinase associated with tumour signalling","top_k":5}'
-```
-
-The API attempts external gene-name enrichment and caches responses on disk. If external lookup does not return description text, provide `entity_description` directly in the request.
-
 ## Dataset
 
 - **Quickstart dataset**: bundled CSV files under `graph_lp/sample_data/quickstart` for a small, runnable demo.
@@ -92,7 +34,7 @@ The API attempts external gene-name enrichment and caches responses on disk. If 
   - `nodes.csv`: `id`, `name`, `description`
   - `edges.csv`: `subject`, `object`
   - `ground_truth.csv`: `source`, `target`, `y` (binary label)
-- **Full dataset for reported results**: The full dataset is not committed to this repository, but a download link and setup instructions are provided in the [Colab runner notebook](notebooks/colab_runner.ipynb) (see the Prerequisites section).
+- **Full dataset for reported results**: The full dataset is not committed to this repository, but a download link and setup instructions are provided in the Colab runner notebook (see the Prerequisites section): [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/r-kowalczyk/graph-link-prediction/blob/main/notebooks/hybrid_runner.ipynb)
 
 ## Reproducibility
 
@@ -222,12 +164,19 @@ Test ROC-AUC (LogReg): 0.9296
 
 - The best overall MLP result was achieved with BioLinkBERT-Large (0.9817 test AUC), followed closely by BioM-BERT-PubMed-PMC-Large (0.9733). The approximately 4% improvement from LogReg (0.9436) to MLP (0.9817) with BioLinkBERT-Large suggests that using a non-linear classifier can capture complex patterns in the data more effectively.
 
-- BioLinkBERT-Large is the default in `configs/full.yaml`, but you can run other semantic embedding models in Colab by setting `EMBEDDING_MODEL` in `notebooks/colab_runner.ipynb`.
+- BioLinkBERT-Large is the default in `configs/full.yaml`, but you can run other semantic embedding models in Colab by setting `EMBEDDING_MODEL` in `notebooks/hybrid_runner.ipynb`.
 
 # Scope and limitations
 
 - This repository is meant to demo an end-to-end link classification pipeline with hybrid embeddings, caching, and reproducible config files.
 - It does not claim to be a production system. It prioritises readability and iteration speed over large-scale training and deployment concerns.
 - Tasks in this repository are binary link prediction tasks. Predicate types are ignored during training and inference.
-- Reported AUC values depend on the provided labels, how negative examples were constructed in the ground truth, and the chosen split strategy. GraphSAGE uses a random edge split with a fixed seed, which can still leak neighbourhood information through shared nodes.
-- For inductive serving, unseen entities are attached with top-k cosine-similarity edges to existing nodes using semantic embeddings. This is a simple heuristic for demonstration and is not a production graph-construction strategy.
+- Reported AUC values depend on the provided labels, how negative examples were constructed in the ground truth, and the chosen split strategy.
+
+---
+
+# GraphSAGE backend (alternative approach)
+
+An alternative modelling backend based on GraphSAGE is available for binary link prediction with inductive serving support. Instead of the hybrid Node2Vec + transformer pipeline above, the GraphSAGE backend trains a graph neural network directly on semantic text embeddings, and can score links for new entities that were not present at training time.
+
+See the full documentation, including quickstart commands, serving demo, curl examples, and a Colab notebook for GPU training: **[docs/graphsage.md](docs/graphsage.md)**
