@@ -624,6 +624,7 @@ def train_graphsage_model(
     decoder_hidden_dimension = int(
         graphsage_configuration.get("decoder_hidden_dim", 64)
     )
+    weight_decay = float(graphsage_configuration.get("weight_decay", 1e-3))
     precision_at_k = int(configuration["metrics"]["precision_at_k"])
     plot_dpi = int(configuration["plots"]["dpi"])
     attachment_seed = int(graphsage_configuration.get("attachment_seed", split_seed))
@@ -657,7 +658,12 @@ def train_graphsage_model(
         decoder_type=decoder_type,
         decoder_hidden_dimension=decoder_hidden_dimension,
     ).to(resolved_device)
-    optimiser = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    # L2 weight decay penalises large parameter values and is the primary guard
+    # against overfitting in full-graph message passing where the encoder sees the
+    # entire topology every forward pass.
+    optimiser = torch.optim.Adam(
+        model.parameters(), lr=learning_rate, weight_decay=weight_decay
+    )
     loss_function = nn.BCEWithLogitsLoss()
     train_node_features = train_data.x.to(resolved_device)
     train_edge_index = train_data.edge_index.to(resolved_device)
@@ -797,6 +803,7 @@ def train_graphsage_model(
             "negative_sampling_ratio": negative_sampling_ratio,
             "decoder_type": decoder_type,
             "decoder_hidden_dim": decoder_hidden_dimension,
+            "weight_decay": weight_decay,
             "split_seed": split_seed,
         },
     }
