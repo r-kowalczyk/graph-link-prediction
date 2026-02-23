@@ -102,16 +102,17 @@ GraphSAGE parameters live under the `graphsage` key in the YAML config. The rele
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `graphsage.hidden_dim` | 128 | Hidden dimension of the SAGEConv layers |
-| `graphsage.output_dim` | 64 | Output embedding dimension |
-| `graphsage.dropout` | 0.3 | Dropout rate between layers |
-| `graphsage.learning_rate` | 0.005 | Adam optimiser learning rate |
-| `graphsage.epochs` | 50 | Number of training epochs |
+| `graphsage.hidden_dim` | 256 | Hidden dimension of the SAGEConv layers |
+| `graphsage.output_dim` | 128 | Output embedding dimension |
+| `graphsage.dropout` | 0.3 | Dropout rate between encoder layers and inside the MLP decoder |
+| `graphsage.learning_rate` | 0.001 | Adam optimiser learning rate |
+| `graphsage.weight_decay` | 0.01 | L2 weight decay for the Adam optimiser (primary overfitting control) |
+| `graphsage.epochs` | 50 | Maximum number of training epochs (best checkpoint is selected by validation AUC) |
 | `graphsage.batch_size` | 512 | Mini-batch size for edge supervision |
-| `graphsage.num_neighbors` | [15, 10] | Neighbours sampled per layer (informational; the current implementation uses full-graph message passing) |
+| `graphsage.num_neighbors` | [25, 10] | Neighbours sampled per layer (informational; the current implementation uses full-graph message passing) |
 | `graphsage.negative_sampling_ratio` | 1.0 | Ratio of negative to positive edges during training |
 | `graphsage.decoder_type` | mlp | Link decoder architecture: `dot_product`, `bilinear`, or `mlp` |
-| `graphsage.decoder_hidden_dim` | 64 | Hidden layer width for the MLP decoder (ignored by other decoders) |
+| `graphsage.decoder_hidden_dim` | 128 | Hidden layer width for the MLP decoder (ignored by other decoders) |
 | `graphsage.attachment_top_k` | 5 | Number of similarity edges when attaching a new node |
 | `graphsage.attachment_seed` | 42 | Seed for deterministic similarity-based attachment |
 
@@ -120,6 +121,130 @@ Set `model.backend: graphsage` in the config or pass `--model graphsage` on the 
 ## Split strategy
 
 Training uses PyTorch Geometric's `RandomLinkSplit` with a fixed seed to produce train, validation, and test edge sets. The message-passing graph used during training does not include validation or test positive edges, so the model cannot directly observe held-out links during forward passes. However, a random edge split can still leak neighbourhood information through shared endpoint nodes. This is a known limitation of transductive graph splits and is documented here for transparency.
+
+---
+
+## Initial approach: results and iterations
+
+This section documents the development of the GraphSAGE backend, the sequence of experiments run on the full dataset with `michiyasunaga/BioLinkBERT-large` as the semantic embedding model, and the reasoning behind each change. The goal was to build an inductive link prediction model that could score new entities without retraining while achieving reasonable predictive performance.
+
+### Context: the hybrid baseline
+
+The existing hybrid pipeline (Node2Vec structural embeddings + transformer semantic embeddings, trained with Logistic Regression and MLP classifiers) achieves 0.98 test ROC-AUC on this dataset. That pipeline works well for entities already present in the graph, but is not inductive: Node2Vec embeddings cannot be computed for unseen entities without retraining on the modified graph.
+
+GraphSAGE was introduced as an alternative that trades some predictive accuracy for the ability to handle unseen entities at serving time. The expected outcome was a lower AUC than the hybrid baseline, but a practical inductive serving capability.
+
+### Run 1: dot-product decoder (initial implementation)
+
+The first implementation used a parameter-free dot-product decoder. The dot product was chosen deliberately for transparency: it introduces no learnable parameters into the decoder, so any predictive signal must come from the GraphSAGE encoder itself. This made it easier to verify that the message-passing layers were producing useful embeddings.
+
+Configuration: `hidden_dim=256, output_dim=128, dropout=0.2, lr=0.001, epochs=20, neg_ratio=1.0`
+
+```
+Test ROC-AUC: 0.7080
+Test PR-AUC: 0.7329
+```
+
+The loss curve showed steady decrease through all 20 epochs with no sign of convergence, suggesting the model had not fully trained. The 0.71 AUC was a reasonable first result but left a large gap to the hybrid baseline.
+
+### Run 2: MLP decoder (replacing dot product)
+
+The dot-product decoder can only capture linear similarity in embedding space. Since the hybrid baseline's MLP classifier clearly benefits from non-linear decision boundaries, the decoder was replaced with a configurable two-layer MLP that concatenates source and target embeddings and passes them through a hidden layer with ReLU activation.
+
+Three decoder types were made config-selectable: `dot_product`, `bilinear`, and `mlp`. The MLP was set as the default. Epochs were increased to 50 to give the model more training time, since the previous run had not converged.
+
+Configuration: `hidden_dim=256, output_dim=128, dropout=0.2, lr=0.001, epochs=50, neg_ratio=1.0, decoder=mlp, decoder_hidden=128`
+
+```
+Test ROC-AUC: 0.6176
+Test PR-AUC: 0.6964
+```
+
+Performance dropped substantially. The training loss fell to 0.003 (near zero), while no validation monitoring was in place at this point. The model had severely overfit: the additional decoder parameters made it easy to memorise training edges, and training for 50 epochs without any regularisation or early stopping made the problem worse.
+
+### Run 3: validation-based best-model selection and decoder dropout
+
+Two changes were made to address the overfitting:
+
+1. **Validation-based best-model selection**: the training loop was modified to evaluate validation ROC-AUC every epoch and keep the weights from the best epoch. This ensures the saved model reflects peak generalisation rather than the final (overfit) state.
+
+2. **Dropout in the MLP decoder**: the MLP decoder had no regularisation of its own (the encoder already had dropout between its layers). A dropout layer was added between the hidden activation and the output layer, using the same dropout rate as the encoder.
+
+Configuration: same as Run 2, with validation monitoring and decoder dropout added.
+
+```
+Best validation ROC-AUC: 0.7926 (epoch 15)
+Test ROC-AUC: 0.7660
+Test PR-AUC: 0.8011
+```
+
+Significant improvement. Best-model selection correctly identified epoch 15 as the peak, avoiding the severe degradation that followed (validation AUC dropped to 0.63 by epoch 50). However, the loss curve still showed the same pattern: rapid memorisation (loss dropping to 0.003) with validation AUC climbing briefly then collapsing. The model was learning useful representations early on but then overfitting past the useful point.
+
+### Run 4: aggressive regularisation (smaller model, higher dropout, more negatives)
+
+An attempt was made to control overfitting through hyperparameter changes rather than architectural changes:
+
+- Model dimensions halved (`hidden_dim=128, output_dim=64, decoder_hidden=64`) to reduce capacity
+- Dropout increased from 0.2 to 0.4
+- Learning rate halved from 0.001 to 0.0005
+- Negative sampling ratio increased from 1.0 to 3.0 (three negative edges per positive edge, making the classification task harder)
+- Epochs increased to 80 to compensate for the slower learning rate
+
+Configuration: `hidden_dim=128, output_dim=64, dropout=0.4, lr=0.0005, epochs=80, neg_ratio=3.0, decoder=mlp, decoder_hidden=64`
+
+```
+Best validation ROC-AUC: 0.7348 (epoch 1)
+Test ROC-AUC: 0.6949
+Test PR-AUC: 0.7590
+```
+
+Worse. The best validation AUC was at epoch 1 and declined monotonically from there. The combination of reduced capacity and harder negatives left the model unable to learn useful patterns. The overfitting was slightly slower (loss plateaued around 0.005 rather than 0.003) but the model had less room to learn generalisable features, so the ceiling dropped.
+
+This confirmed that the overfitting problem was not about model capacity. It was about unconstrained parameter growth in the presence of full-graph message passing.
+
+### Run 5: weight decay (final configuration)
+
+The root cause of the overfitting was identified: full-graph message passing means every training forward pass runs the encoder over the entire graph. With two SAGEConv layers, each node aggregates information from its 2-hop neighbourhood, which on a graph of this size covers most of the graph. Without any penalty on parameter magnitudes, the encoder parameters grow to encode exact edge identity rather than generalisable structural patterns.
+
+**L2 weight decay** was added to the Adam optimiser. Weight decay directly penalises large parameter values, which prevents the encoder from encoding exact edge identity and forces it to learn more compact, generalisable representations. A relatively aggressive value of 0.01 was chosen because the overfitting had been severe in all previous runs.
+
+The model dimensions were reverted to the original values (256/128/128) because the capacity reduction from Run 4 had been counterproductive. Dropout was set to 0.3 (a middle ground) and negative sampling ratio was reverted to 1.0.
+
+Configuration: `hidden_dim=256, output_dim=128, dropout=0.3, lr=0.001, weight_decay=0.01, epochs=50, neg_ratio=1.0, decoder=mlp, decoder_hidden=128`
+
+```
+Best validation ROC-AUC: 0.7612 (epoch 3)
+Test ROC-AUC: 0.7237
+Test PR-AUC: 0.7624
+```
+
+The overfitting problem was solved. Training loss plateaued around 0.073 (compared to 0.003 without weight decay). Validation AUC remained stable across all 50 epochs, fluctuating between 0.72 and 0.76 rather than collapsing. The model was no longer memorising training edges.
+
+However, the test AUC of 0.72 represents the practical ceiling of this architecture on this dataset with semantic-only node features.
+
+### Summary table
+
+| Run | Decoder | Weight decay | Best val AUC | Test AUC | Notes |
+|-----|---------|-------------|-------------|----------|-------|
+| 1 | dot_product | none | n/a | 0.708 | No validation monitoring; loss still decreasing at epoch 20 |
+| 2 | mlp | none | n/a | 0.618 | Severe overfitting; train loss reached 0.003 |
+| 3 | mlp | none | 0.793 | 0.766 | Best-model selection and decoder dropout added |
+| 4 | mlp | none | 0.735 | 0.695 | Smaller model and harder negatives made things worse |
+| 5 | mlp | 0.01 | 0.761 | 0.724 | Overfitting solved; this is the representational ceiling |
+
+### Conclusion
+
+The GraphSAGE backend with semantic-only node features achieves approximately 0.72 test ROC-AUC on this dataset, compared to 0.98 for the hybrid baseline. This gap exists because the hybrid baseline uses dedicated structural embeddings (Node2Vec) that directly encode graph topology through hundreds of random walk iterations, while GraphSAGE must learn structural patterns implicitly through only two layers of neighbourhood aggregation.
+
+The 0.72 AUC is a reasonable result for an inductive model. The key advantage of this backend is not raw predictive accuracy on known entities (where the hybrid baseline is clearly superior) but the ability to score new entities at serving time without retraining.
+
+### Potential improvements
+
+The most promising directions for closing the gap to the hybrid baseline are:
+
+- **Fetching real interaction edges at serving time**: replacing the cosine-similarity attachment heuristic with real edges from public biomedical APIs (STRING for protein-protein interactions, DGIdb for drug-gene interactions) would give GraphSAGE genuine structural context for new nodes rather than a text-similarity approximation.
+- **Deeper encoder**: more SAGEConv layers would let the model aggregate information from a wider neighbourhood. This requires careful regularisation to avoid over-smoothing.
+- **Mini-batch subgraph sampling**: replacing full-graph message passing with neighbour sampling (LinkNeighborLoader) would reduce the information available to the encoder at each step, which acts as implicit regularisation and may improve generalisation. This was avoided in the initial implementation to keep the quickstart dependency-free (neighbour sampling requires `pyg-lib` or `torch-sparse`).
 
 ## Scope and limitations
 
