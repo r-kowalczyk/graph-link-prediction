@@ -149,22 +149,31 @@ class MLPLinkDecoder(nn.Module):
     """Decode candidate links with a two-layer MLP over concatenated embeddings.
 
     The MLP decoder concatenates source and target embeddings and passes them
-    through a hidden layer with ReLU activation followed by a single output unit.
+    through a hidden layer with ReLU activation, dropout, and a single output unit.
     This allows learning non-linear decision boundaries between link endpoints,
     which typically outperforms dot product and bilinear decoders on datasets
-    where structural and semantic similarity interact in complex ways.
+    where structural and semantic similarity interact in complex ways. Dropout
+    is applied between the hidden and output layers to reduce overfitting on
+    the training edge set.
     """
 
-    def __init__(self, embedding_dimension: int, decoder_hidden_dimension: int) -> None:
+    def __init__(
+        self,
+        embedding_dimension: int,
+        decoder_hidden_dimension: int,
+        dropout_rate: float = 0.2,
+    ) -> None:
         """Initialise the two-layer MLP used for link scoring.
 
         Parameters:
             embedding_dimension: Width of the node embeddings from the encoder.
             decoder_hidden_dimension: Width of the hidden layer inside the decoder MLP.
+            dropout_rate: Dropout applied after the hidden activation to limit overfitting.
         """
         super().__init__()
         # Concatenation of source and target embeddings doubles the input width.
         self.hidden_layer = nn.Linear(embedding_dimension * 2, decoder_hidden_dimension)
+        self.dropout_rate = float(dropout_rate)
         self.output_layer = nn.Linear(decoder_hidden_dimension, 1)
 
     def forward(
@@ -187,6 +196,9 @@ class MLPLinkDecoder(nn.Module):
             [source_node_embeddings, target_node_embeddings], dim=-1
         )
         hidden = torch_functional.relu(self.hidden_layer(concatenated))
+        hidden = torch_functional.dropout(
+            hidden, p=self.dropout_rate, training=self.training
+        )
         return self.output_layer(hidden).squeeze(-1)
 
 
@@ -198,6 +210,7 @@ def _build_decoder(
     decoder_type: str,
     embedding_dimension: int,
     decoder_hidden_dimension: int,
+    dropout_rate: float = 0.2,
 ) -> nn.Module:
     """Instantiate a link decoder module by type string.
 
@@ -209,6 +222,7 @@ def _build_decoder(
         decoder_type: One of "dot_product", "bilinear", or "mlp".
         embedding_dimension: Width of the node embeddings from the encoder.
         decoder_hidden_dimension: Hidden width for the MLP decoder (ignored by others).
+        dropout_rate: Dropout probability forwarded to the MLP decoder (ignored by others).
 
     Returns:
         An initialised decoder module ready for training or weight loading.
@@ -221,6 +235,7 @@ def _build_decoder(
         return MLPLinkDecoder(
             embedding_dimension=embedding_dimension,
             decoder_hidden_dimension=decoder_hidden_dimension,
+            dropout_rate=dropout_rate,
         )
     raise ValueError(
         f"Unsupported decoder type '{decoder_type}'. "
@@ -267,6 +282,7 @@ class GraphSageLinkPredictor(nn.Module):
             decoder_type=decoder_type,
             embedding_dimension=output_dimension,
             decoder_hidden_dimension=decoder_hidden_dimension,
+            dropout_rate=dropout_rate,
         )
 
     def encode(
@@ -646,6 +662,12 @@ def train_graphsage_model(
     train_node_features = train_data.x.to(resolved_device)
     train_edge_index = train_data.edge_index.to(resolved_device)
 
+    # Track best validation ROC-AUC across epochs and keep the corresponding weights.
+    # This prevents overfitting when using learnable decoders (MLP, bilinear) that can
+    # memorise training edges if trained past the generalisation peak.
+    best_validation_roc_auc = -1.0
+    best_model_state: dict[str, Any] | None = None
+
     for epoch_number in range(number_of_epochs):
         model.train()
         epoch_loss_values: list[float] = []
@@ -663,11 +685,41 @@ def train_graphsage_model(
         mean_epoch_loss = (
             float(np.mean(epoch_loss_values)) if epoch_loss_values else 0.0
         )
+
+        # Evaluate validation ROC-AUC each epoch to select the best checkpoint.
+        epoch_validation_labels, epoch_validation_probabilities = collect_probabilities(
+            model=model,
+            split_data=validation_data,
+            batch_size=batch_size,
+            device=resolved_device,
+        )
+        epoch_validation_metrics = compute_classification_metrics(
+            epoch_validation_labels,
+            epoch_validation_probabilities,
+            precision_at_k,
+        )
+        epoch_validation_roc_auc = float(epoch_validation_metrics["roc_auc"])
+
         print(
             f"    GraphSAGE epoch {epoch_number + 1}/{number_of_epochs} "
-            f"loss={mean_epoch_loss:.4f}",
+            f"loss={mean_epoch_loss:.4f} val_auc={epoch_validation_roc_auc:.4f}",
             flush=True,
         )
+
+        if epoch_validation_roc_auc > best_validation_roc_auc:
+            best_validation_roc_auc = epoch_validation_roc_auc
+            best_model_state = {
+                key: tensor.cpu().clone() for key, tensor in model.state_dict().items()
+            }
+
+    # Restore the weights from the epoch with the highest validation ROC-AUC.
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+        model.to(resolved_device)
+    print(
+        f"    Best validation ROC-AUC: {best_validation_roc_auc:.4f}",
+        flush=True,
+    )
 
     validation_labels, validation_probabilities = collect_probabilities(
         model=model,
