@@ -1,6 +1,3 @@
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/r-kowalczyk/graph-link-prediction/blob/main/notebooks/colab_runner.ipynb)
-
-
 # Graph Link Prediction
 
 # Quickstart
@@ -37,7 +34,7 @@ The training command writes a timestamped run folder under `artifacts_quickstart
   - `nodes.csv`: `id`, `name`, `description`
   - `edges.csv`: `subject`, `object`
   - `ground_truth.csv`: `source`, `target`, `y` (binary label)
-- **Full dataset for reported results**: The full dataset is not committed to this repository, but a download link and setup instructions are provided in the [Colab runner notebook](notebooks/colab_runner.ipynb) (see the Prerequisites section).
+- **Full dataset for reported results**: The full dataset is not committed to this repository, but a download link and setup instructions are provided in the Colab runner notebook (see the Prerequisites section): [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/r-kowalczyk/graph-link-prediction/blob/main/notebooks/hybrid_runner.ipynb)
 
 ## Reproducibility
 
@@ -167,10 +164,19 @@ Test ROC-AUC (LogReg): 0.9296
 
 - The best overall MLP result was achieved with BioLinkBERT-Large (0.9817 test AUC), followed closely by BioM-BERT-PubMed-PMC-Large (0.9733). The approximately 4% improvement from LogReg (0.9436) to MLP (0.9817) with BioLinkBERT-Large suggests that using a non-linear classifier can capture complex patterns in the data more effectively.
 
-- BioLinkBERT-Large is the default in `configs/full.yaml`, but you can run other semantic embedding models in Colab by setting `EMBEDDING_MODEL` in `notebooks/colab_runner.ipynb`.
+- BioLinkBERT-Large is the default in `configs/full.yaml`, but you can run other semantic embedding models in Colab by setting `EMBEDDING_MODEL` in `notebooks/hybrid_runner.ipynb`.
 
 # Scope and limitations
 
 - This repository is meant to demo an end-to-end link classification pipeline with hybrid embeddings, caching, and reproducible config files.
 - It does not claim to be a production system. It prioritises readability and iteration speed over large-scale training and deployment concerns.
-- Reported AUC values depend on the provided labels, how negative examples were constructed in the ground truth, and the chosen split strategy. This implementation uses a random split of labelled node pairs, which can overestimate performance due to information leakage via shared nodes and neighbourhood structure. While the training graph removes validation and test positive edges before Node2Vec to reduce direct leakage, more stringent strategies (for example node-disjoint or entity and group-based splits) are not implemented.
+- Tasks in this repository are binary link prediction tasks. Predicate types are ignored during training and inference.
+- Reported AUC values depend on the provided labels, how negative examples were constructed in the ground truth, and the chosen split strategy.
+
+---
+
+# GraphSAGE backend (alternative approach)
+
+An alternative modelling backend based on GraphSAGE is available for binary link prediction with inductive serving support. Instead of the hybrid Node2Vec + transformer pipeline above, the GraphSAGE backend trains a graph neural network directly on semantic text embeddings, and can score links for new entities that were not present at training time.
+
+See the full documentation, including quickstart commands, serving demo, curl examples, and a Colab notebook for GPU training: **[docs/graphsage.md](docs/graphsage.md)**
