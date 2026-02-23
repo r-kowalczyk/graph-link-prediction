@@ -65,6 +65,8 @@ def _build_fake_bundle() -> LoadedGraphSageBundle:
         hidden_dimension=4,
         output_dimension=4,
         dropout_rate=0.0,
+        decoder_type="mlp",
+        decoder_hidden_dimension=4,
     )
     model.eval()
     node_features = torch.tensor(

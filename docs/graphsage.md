@@ -1,6 +1,10 @@
 # GraphSAGE Backend
 
-GraphSAGE is an alternative backend for binary link prediction on a single graph. It uses semantic text embeddings as node features and trains a two-layer GraphSAGE encoder with a dot-product link decoder. The dot-product decoder was chosen because it is parameter-free, fast to evaluate, and works well when the encoder already produces expressive embeddings.
+GraphSAGE is an alternative backend for binary link prediction on a single graph. It uses semantic text embeddings as node features and trains a two-layer GraphSAGE encoder with a configurable link decoder. Three decoder architectures are supported:
+
+- **`mlp`** (default): a two-layer MLP over concatenated source and target embeddings. This can learn non-linear decision boundaries and typically gives the best results.
+- **`bilinear`**: a learnable bilinear interaction matrix. More expressive than dot product while adding only one (output_dim x output_dim) parameter matrix.
+- **`dot_product`**: a parameter-free dot product. Fast but limited to linear similarity in embedding space.
 
 The backend supports inductive inference: new entities that were not present at training time can be scored against existing nodes without retraining.
 
@@ -88,7 +92,7 @@ When the API receives a request involving an entity that is not in the training 
 1. Embeds the entity text (name and description) using the same transformer model used during training.
 2. Attaches the new node to the existing graph by connecting it to the top-k most similar existing nodes, measured by cosine similarity in the semantic embedding space. The value of k is set by `graphsage.attachment_top_k` in the config.
 3. Runs GraphSAGE message passing over the augmented graph to produce an embedding for the new node.
-4. Scores the new node against the requested target (or all candidates for top-k retrieval) using the dot-product decoder.
+4. Scores the new node against the requested target (or all candidates for top-k retrieval) using the configured decoder (MLP by default).
 
 This attachment heuristic is deterministic (seeded) and simple by design. It assumes that semantically similar entities are likely to be structurally close in the graph. This is a reasonable starting point for biomedical knowledge graphs but is not a production graph-construction strategy.
 
@@ -106,6 +110,8 @@ GraphSAGE parameters live under the `graphsage` key in the YAML config. The rele
 | `graphsage.batch_size` | 512 | Mini-batch size for edge supervision |
 | `graphsage.num_neighbors` | [15, 10] | Neighbours sampled per layer (informational; the current implementation uses full-graph message passing) |
 | `graphsage.negative_sampling_ratio` | 1.0 | Ratio of negative to positive edges during training |
+| `graphsage.decoder_type` | mlp | Link decoder architecture: `dot_product`, `bilinear`, or `mlp` |
+| `graphsage.decoder_hidden_dim` | 64 | Hidden layer width for the MLP decoder (ignored by other decoders) |
 | `graphsage.attachment_top_k` | 5 | Number of similarity edges when attaching a new node |
 | `graphsage.attachment_seed` | 42 | Seed for deterministic similarity-based attachment |
 

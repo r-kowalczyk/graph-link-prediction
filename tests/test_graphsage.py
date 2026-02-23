@@ -9,6 +9,12 @@ import pytest
 import torch
 
 from graph_lp.graphsage import (
+    SUPPORTED_DECODER_TYPES,
+    BilinearLinkDecoder,
+    DotProductLinkDecoder,
+    GraphSageLinkPredictor,
+    MLPLinkDecoder,
+    _build_decoder,
     build_graph_data,
     build_negative_edge_labels,
     export_graphsage_bundle,
@@ -36,6 +42,58 @@ def _create_toy_graph_data():
         edge_pairs=edge_pairs,
         is_undirected=True,
     )
+
+
+def test_build_decoder_creates_correct_decoder_types():
+    """The decoder factory should return the correct module for each supported type."""
+
+    dot_decoder = _build_decoder(
+        "dot_product", embedding_dimension=8, decoder_hidden_dimension=16
+    )
+    assert isinstance(dot_decoder, DotProductLinkDecoder)
+
+    bilinear_decoder = _build_decoder(
+        "bilinear", embedding_dimension=8, decoder_hidden_dimension=16
+    )
+    assert isinstance(bilinear_decoder, BilinearLinkDecoder)
+
+    mlp_decoder = _build_decoder(
+        "mlp", embedding_dimension=8, decoder_hidden_dimension=16
+    )
+    assert isinstance(mlp_decoder, MLPLinkDecoder)
+
+
+def test_build_decoder_rejects_unsupported_type():
+    """The decoder factory should raise ValueError for unrecognised decoder strings."""
+
+    with pytest.raises(ValueError, match="Unsupported decoder type"):
+        _build_decoder("unknown", embedding_dimension=8, decoder_hidden_dimension=16)
+
+
+@pytest.mark.parametrize("decoder_type", list(SUPPORTED_DECODER_TYPES))
+def test_all_decoder_types_produce_correct_output_shape(decoder_type):
+    """Every decoder type should produce one logit per candidate edge."""
+
+    torch.manual_seed(0)
+    model = GraphSageLinkPredictor(
+        input_dimension=4,
+        hidden_dimension=4,
+        output_dimension=4,
+        dropout_rate=0.0,
+        decoder_type=decoder_type,
+        decoder_hidden_dimension=4,
+    )
+    model.eval()
+    node_features = torch.randn(3, 4)
+    edge_index = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
+    edge_label_index = torch.tensor([[0, 1], [2, 0]], dtype=torch.long)
+
+    logits = model(
+        node_features=node_features,
+        edge_index=edge_index,
+        edge_label_index=edge_label_index,
+    )
+    assert logits.shape == (2,)
 
 
 def test_build_graph_data_supports_empty_edge_list():
@@ -124,6 +182,8 @@ def test_train_graphsage_model_and_bundle_roundtrip(tmp_path):
             "batch_size": 2,
             "num_neighbors": [2, 2],
             "negative_sampling_ratio": 1.0,
+            "decoder_type": "mlp",
+            "decoder_hidden_dim": 8,
             "attachment_seed": 42,
             "attachment_top_k": 2,
         },
@@ -171,6 +231,8 @@ def test_train_graphsage_model_and_bundle_roundtrip(tmp_path):
     with open(run_directory / "bundle" / "manifest.json", "r", encoding="utf-8") as f:
         manifest = json.load(f)
     assert manifest["semantic_model_name"] == "test-model"
+    assert manifest["model"]["decoder_type"] == "mlp"
+    assert manifest["model"]["decoder_hidden_dim"] == 8
 
 
 def test_export_graphsage_bundle_checks_missing_required_files(tmp_path):

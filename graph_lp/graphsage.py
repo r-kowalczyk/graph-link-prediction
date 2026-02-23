@@ -80,9 +80,9 @@ class GraphSageEncoder(nn.Module):
 class DotProductLinkDecoder(nn.Module):
     """Decode candidate links by dot product between endpoint embeddings.
 
-    Dot product is intentionally selected because it is parameter-free and fast.
-    This choice keeps the baseline transparent and avoids extra decoder complexity
-    so the effect of GraphSAGE message passing is easier to inspect in quickstart.
+    Dot product is parameter-free and fast but can only capture linear similarity
+    in embedding space. Suitable for quick sanity runs but typically underperforms
+    learnable decoders on real datasets where decision boundaries are non-linear.
     """
 
     def forward(
@@ -104,12 +104,137 @@ class DotProductLinkDecoder(nn.Module):
         return (source_node_embeddings * target_node_embeddings).sum(dim=-1)
 
 
+class BilinearLinkDecoder(nn.Module):
+    """Decode candidate links with a learnable bilinear interaction matrix.
+
+    A bilinear decoder learns a square weight matrix that transforms one endpoint
+    before taking the dot product with the other. This adds expressiveness over a
+    plain dot product (it can weight embedding dimensions differently) while staying
+    compact: the only parameter is one (output_dim x output_dim) matrix.
+    """
+
+    def __init__(self, embedding_dimension: int) -> None:
+        """Initialise the bilinear interaction weight matrix.
+
+        Parameters:
+            embedding_dimension: Width of the node embeddings produced by the encoder.
+        """
+        super().__init__()
+        self.bilinear_layer = nn.Bilinear(
+            embedding_dimension, embedding_dimension, 1, bias=False
+        )
+
+    def forward(
+        self,
+        node_embeddings: torch.Tensor,
+        edge_label_index: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute link logits using a learnable bilinear form.
+
+        Parameters:
+            node_embeddings: Node embedding matrix from the GraphSAGE encoder.
+            edge_label_index: Candidate links with source and target node indices.
+
+        Returns:
+            A one-dimensional tensor of logits for each candidate edge.
+        """
+        source_node_embeddings = node_embeddings[edge_label_index[0]]
+        target_node_embeddings = node_embeddings[edge_label_index[1]]
+        return self.bilinear_layer(
+            source_node_embeddings, target_node_embeddings
+        ).squeeze(-1)
+
+
+class MLPLinkDecoder(nn.Module):
+    """Decode candidate links with a two-layer MLP over concatenated embeddings.
+
+    The MLP decoder concatenates source and target embeddings and passes them
+    through a hidden layer with ReLU activation followed by a single output unit.
+    This allows learning non-linear decision boundaries between link endpoints,
+    which typically outperforms dot product and bilinear decoders on datasets
+    where structural and semantic similarity interact in complex ways.
+    """
+
+    def __init__(self, embedding_dimension: int, decoder_hidden_dimension: int) -> None:
+        """Initialise the two-layer MLP used for link scoring.
+
+        Parameters:
+            embedding_dimension: Width of the node embeddings from the encoder.
+            decoder_hidden_dimension: Width of the hidden layer inside the decoder MLP.
+        """
+        super().__init__()
+        # Concatenation of source and target embeddings doubles the input width.
+        self.hidden_layer = nn.Linear(embedding_dimension * 2, decoder_hidden_dimension)
+        self.output_layer = nn.Linear(decoder_hidden_dimension, 1)
+
+    def forward(
+        self,
+        node_embeddings: torch.Tensor,
+        edge_label_index: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute link logits from concatenated source and target embeddings.
+
+        Parameters:
+            node_embeddings: Node embedding matrix from the GraphSAGE encoder.
+            edge_label_index: Candidate links with source and target node indices.
+
+        Returns:
+            A one-dimensional tensor of logits for each candidate edge.
+        """
+        source_node_embeddings = node_embeddings[edge_label_index[0]]
+        target_node_embeddings = node_embeddings[edge_label_index[1]]
+        concatenated = torch.cat(
+            [source_node_embeddings, target_node_embeddings], dim=-1
+        )
+        hidden = torch_functional.relu(self.hidden_layer(concatenated))
+        return self.output_layer(hidden).squeeze(-1)
+
+
+# Recognised decoder type strings mapped to short descriptions for validation.
+SUPPORTED_DECODER_TYPES = ("dot_product", "bilinear", "mlp")
+
+
+def _build_decoder(
+    decoder_type: str,
+    embedding_dimension: int,
+    decoder_hidden_dimension: int,
+) -> nn.Module:
+    """Instantiate a link decoder module by type string.
+
+    This factory centralises decoder construction so both training and bundle loading
+    use the same logic. The decoder_type string is stored in the serving manifest so
+    the correct decoder is reconstructed without retraining.
+
+    Parameters:
+        decoder_type: One of "dot_product", "bilinear", or "mlp".
+        embedding_dimension: Width of the node embeddings from the encoder.
+        decoder_hidden_dimension: Hidden width for the MLP decoder (ignored by others).
+
+    Returns:
+        An initialised decoder module ready for training or weight loading.
+    """
+    if decoder_type == "dot_product":
+        return DotProductLinkDecoder()
+    if decoder_type == "bilinear":
+        return BilinearLinkDecoder(embedding_dimension=embedding_dimension)
+    if decoder_type == "mlp":
+        return MLPLinkDecoder(
+            embedding_dimension=embedding_dimension,
+            decoder_hidden_dimension=decoder_hidden_dimension,
+        )
+    raise ValueError(
+        f"Unsupported decoder type '{decoder_type}'. "
+        f"Supported types: {SUPPORTED_DECODER_TYPES}"
+    )
+
+
 class GraphSageLinkPredictor(nn.Module):
-    """Combine GraphSAGE encoding with a dot-product binary link decoder.
+    """Combine GraphSAGE encoding with a configurable link decoder.
 
     The predictor exposes separate encode and decode methods so training and serving
     can reuse the same components while keeping function-level tests straightforward.
-    This keeps the model path clear and minimal for CPU-oriented demonstrations.
+    The decoder type is selectable at construction time and persisted in the bundle
+    manifest so serving reconstructs the same architecture without retraining.
     """
 
     def __init__(
@@ -118,6 +243,8 @@ class GraphSageLinkPredictor(nn.Module):
         hidden_dimension: int,
         output_dimension: int,
         dropout_rate: float,
+        decoder_type: str = "mlp",
+        decoder_hidden_dimension: int = 64,
     ) -> None:
         """Create encoder and decoder modules for binary link scoring.
 
@@ -126,6 +253,8 @@ class GraphSageLinkPredictor(nn.Module):
             hidden_dimension: Width of the hidden GraphSAGE representation.
             output_dimension: Width of the final node embeddings.
             dropout_rate: Dropout probability used inside the encoder.
+            decoder_type: Which decoder architecture to use ("dot_product", "bilinear", or "mlp").
+            decoder_hidden_dimension: Hidden layer width for the MLP decoder (ignored by other decoders).
         """
         super().__init__()
         self.encoder = GraphSageEncoder(
@@ -134,7 +263,11 @@ class GraphSageLinkPredictor(nn.Module):
             output_dimension=output_dimension,
             dropout_rate=dropout_rate,
         )
-        self.decoder = DotProductLinkDecoder()
+        self.decoder = _build_decoder(
+            decoder_type=decoder_type,
+            embedding_dimension=output_dimension,
+            decoder_hidden_dimension=decoder_hidden_dimension,
+        )
 
     def encode(
         self, node_features: torch.Tensor, edge_index: torch.Tensor
@@ -471,6 +604,10 @@ def train_graphsage_model(
         graphsage_configuration.get("negative_sampling_ratio", 1.0)
     )
     number_of_neighbours = list(graphsage_configuration.get("num_neighbors", [20, 10]))
+    decoder_type = str(graphsage_configuration.get("decoder_type", "mlp"))
+    decoder_hidden_dimension = int(
+        graphsage_configuration.get("decoder_hidden_dim", 64)
+    )
     precision_at_k = int(configuration["metrics"]["precision_at_k"])
     plot_dpi = int(configuration["plots"]["dpi"])
     attachment_seed = int(graphsage_configuration.get("attachment_seed", split_seed))
@@ -501,6 +638,8 @@ def train_graphsage_model(
         hidden_dimension=hidden_dimension,
         output_dimension=output_dimension,
         dropout_rate=dropout_rate,
+        decoder_type=decoder_type,
+        decoder_hidden_dimension=decoder_hidden_dimension,
     ).to(resolved_device)
     optimiser = torch.optim.Adam(model.parameters(), lr=learning_rate)
     loss_function = nn.BCEWithLogitsLoss()
@@ -583,6 +722,8 @@ def train_graphsage_model(
             "output_dim": output_dimension,
             "dropout": dropout_rate,
             "input_dim": int(graph_data.x.size(1)),
+            "decoder_type": decoder_type,
+            "decoder_hidden_dim": decoder_hidden_dimension,
         },
     }
     write_json(os.path.join(run_directory, "graphsage_metadata.json"), metadata)
@@ -602,6 +743,8 @@ def train_graphsage_model(
             "batch_size": batch_size,
             "num_neighbors": number_of_neighbours,
             "negative_sampling_ratio": negative_sampling_ratio,
+            "decoder_type": decoder_type,
+            "decoder_hidden_dim": decoder_hidden_dimension,
             "split_seed": split_seed,
         },
     }
@@ -701,6 +844,8 @@ def load_graphsage_bundle(
         hidden_dimension=int(model_configuration["hidden_dim"]),
         output_dimension=int(model_configuration["output_dim"]),
         dropout_rate=float(model_configuration["dropout"]),
+        decoder_type=str(model_configuration.get("decoder_type", "dot_product")),
+        decoder_hidden_dimension=int(model_configuration.get("decoder_hidden_dim", 64)),
     ).to(device)
     state_dictionary = torch.load(
         os.path.join(bundle_directory, "model_state.pt"),

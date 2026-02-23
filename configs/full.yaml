@@ -59,10 +59,12 @@ graphsage:
   output_dim: 128
   dropout: 0.2
   learning_rate: 0.001
-  epochs: 20
+  epochs: 50
   batch_size: 512
   num_neighbors: [25, 10]
   negative_sampling_ratio: 1.0
+  decoder_type: mlp
+  decoder_hidden_dim: 128
   attachment_top_k: 5
   attachment_seed: 42
 

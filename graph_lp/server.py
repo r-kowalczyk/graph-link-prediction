@@ -344,7 +344,11 @@ class GraphSageServingEngine:
         source_index: int,
         target_index: int,
     ) -> float:
-        """Compute sigmoid link score for one pair using node embeddings.
+        """Compute sigmoid link score for one pair using the model decoder.
+
+        Scoring is routed through the model's decode method so the same decoder
+        architecture (dot product, bilinear, or MLP) used during training is
+        applied consistently at serving time.
 
         Parameters:
             node_embeddings: Embedding matrix that includes requested endpoints.
@@ -354,9 +358,13 @@ class GraphSageServingEngine:
         Returns:
             Probability score in the range [0, 1].
         """
-        source_embedding = node_embeddings[source_index]
-        target_embedding = node_embeddings[target_index]
-        logit = torch.sum(source_embedding * target_embedding)
+        edge_label_index = torch.tensor(
+            [[source_index], [target_index]], dtype=torch.long, device=self.device
+        )
+        logit = self.bundle.model.decode(
+            node_embeddings=node_embeddings,
+            edge_label_index=edge_label_index,
+        )
         return float(torch.sigmoid(logit).item())
 
     def predict_link(
@@ -536,9 +544,22 @@ class GraphSageServingEngine:
                 if candidate_index != source_index
             ]
 
-        source_embedding = scoring_embeddings[source_index]
-        candidate_embeddings = scoring_embeddings[candidate_indices]
-        logits = (candidate_embeddings * source_embedding).sum(dim=-1)
+        # Build an edge_label_index pairing the source with every candidate so the
+        # model decoder scores all candidates in one batched forward pass.
+        source_indices = torch.full(
+            (len(candidate_indices),),
+            source_index,
+            dtype=torch.long,
+            device=self.device,
+        )
+        target_indices = torch.tensor(
+            candidate_indices, dtype=torch.long, device=self.device
+        )
+        edge_label_index = torch.stack([source_indices, target_indices], dim=0)
+        logits = self.bundle.model.decode(
+            node_embeddings=scoring_embeddings,
+            edge_label_index=edge_label_index,
+        )
         probabilities = torch.sigmoid(logits).detach().cpu().numpy()
         ranking_order = np.argsort(-probabilities)
         selected_indices = ranking_order[: int(top_k)]
