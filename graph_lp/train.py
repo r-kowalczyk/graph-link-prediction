@@ -117,7 +117,7 @@ def run(cfg: Dict, variant: str) -> Dict:
     ]
 
     if model_backend == "graphsage":
-        print("Step 2/5: preparing semantic features for GraphSAGE...", flush=True)
+        print("Step 2/7: preparing semantic features for GraphSAGE...", flush=True)
         nodes_csv_path = os.path.join(cfg["data"]["dir"], cfg["data"]["nodes_csv"])
         edges_csv_path = os.path.join(cfg["data"]["dir"], cfg["data"]["edges_csv"])
         gt_csv_path = os.path.join(cfg["data"]["dir"], cfg["data"]["ground_truth_csv"])
@@ -135,11 +135,11 @@ def run(cfg: Dict, variant: str) -> Dict:
         )
         semantic_path = os.path.join(cache_dir, f"semantic_graphsage_{cache_key}.npy")
         if os.path.exists(semantic_path):
-            print("Step 3/5: loading cached semantic embeddings...", flush=True)
+            print("Step 3/7: loading cached semantic embeddings...", flush=True)
             semantic = np.load(semantic_path)
         else:
             print(
-                "Step 3/5: computing semantic embeddings for GraphSAGE node features...",
+                "Step 3/7: computing semantic embeddings for GraphSAGE node features...",
                 flush=True,
             )
             semantic = transformer_semantic_embeddings(
@@ -151,7 +151,50 @@ def run(cfg: Dict, variant: str) -> Dict:
             )
             np.save(semantic_path, semantic)
 
-        print("Step 4/5: building graph and training GraphSAGE...", flush=True)
+        # Split ground_truth.csv into train/val/test using the same stratified split
+        # as the baseline pipeline. This ensures both models are supervised on and
+        # evaluated against the exact same pairs, making their metrics comparable.
+        print("Step 4/7: splitting ground truth labels...", flush=True)
+        gt = gt.copy()
+        gt["source"] = gt["source"].astype(str)
+        gt["target"] = gt["target"].astype(str)
+        pos_pairs = [
+            (node_idx[u], node_idx[v])
+            for u, v in gt[gt["y"] == 1][["source", "target"]].values
+        ]
+        neg_pairs = [
+            (node_idx[u], node_idx[v])
+            for u, v in gt[gt["y"] == 0][["source", "target"]].values
+        ]
+        all_pairs = pos_pairs + neg_pairs
+        labels = np.array([1] * len(pos_pairs) + [0] * len(neg_pairs), dtype=int)
+
+        # First split: train vs (val + test), stratified for class balance.
+        x_pairs_train, x_pairs_tmp, y_train, y_tmp = train_test_split(
+            all_pairs,
+            labels,
+            test_size=(cfg["splits"]["val_ratio"] + cfg["splits"]["test_ratio"]),
+            stratify=labels,
+            random_state=int(cfg["seed"]),
+        )
+        rel = (
+            cfg["splits"]["test_ratio"]
+            / (cfg["splits"]["val_ratio"] + cfg["splits"]["test_ratio"])
+            if (cfg["splits"]["val_ratio"] + cfg["splits"]["test_ratio"]) > 0
+            else 0.5
+        )
+        x_pairs_val, x_pairs_test, y_val, y_test = train_test_split(
+            x_pairs_tmp,
+            y_tmp,
+            test_size=rel,
+            stratify=y_tmp,
+            random_state=int(cfg["seed"]),
+        )
+
+        print("Step 5/7: building graph and training GraphSAGE...", flush=True)
+        # Build the full message-passing graph from edges.csv. The training function
+        # removes val/test positive edges internally for leakage prevention, and saves
+        # the full graph to the serving bundle for inference.
         graph_data = build_graph_data(
             node_feature_matrix=semantic,
             edge_pairs=edge_idx,
@@ -174,6 +217,12 @@ def run(cfg: Dict, variant: str) -> Dict:
         graphsage_cfg["device"] = str(device)
         out = train_graphsage_model(
             graph_data=graph_data,
+            train_pairs=x_pairs_train,
+            train_labels=np.asarray(y_train),
+            validation_pairs=x_pairs_val,
+            validation_labels=np.asarray(y_val),
+            test_pairs=x_pairs_test,
+            test_labels=np.asarray(y_test),
             run_directory=run_dir,
             configuration=graphsage_cfg,
             node_id_to_index=node_idx,
@@ -195,8 +244,8 @@ def run(cfg: Dict, variant: str) -> Dict:
             except Exception:
                 pass
 
-        print("Step 5/5: GraphSAGE run artefacts saved.", flush=True)
-        print(f"Run complete. Artefacts are in: {run_dir}", flush=True)
+        print("Step 6/7: GraphSAGE run artefacts saved.", flush=True)
+        print(f"Step 7/7: run complete. Artefacts are in: {run_dir}", flush=True)
         print(
             "\n".join(
                 [
@@ -204,6 +253,9 @@ def run(cfg: Dict, variant: str) -> Dict:
                     "--- Run summary ---",
                     "  Backend: graphsage",
                     f"  Semantic embedding model: {cfg['semantic']['model_name']}",
+                    f"  Train pairs: {len(x_pairs_train)}",
+                    f"  Val pairs: {len(x_pairs_val)}",
+                    f"  Test pairs: {len(x_pairs_test)}",
                     f"  Test ROC-AUC (GraphSAGE): {out.get('test', {}).get('roc_auc', 'N/A')}",
                     f"  Test PR-AUC (GraphSAGE): {out.get('test', {}).get('pr_auc', 'N/A')}",
                     "---",

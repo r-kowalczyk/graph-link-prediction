@@ -20,8 +20,6 @@ from torch import nn
 import torch.nn.functional as torch_functional
 from torch_geometric.data import Data
 from torch_geometric.nn import SAGEConv
-from torch_geometric.transforms import RandomLinkSplit
-from torch_geometric.utils import negative_sampling
 
 from .eval import compute_and_plot
 from .metrics import compute_classification_metrics
@@ -398,78 +396,45 @@ def build_graph_data(
     )
 
 
-def split_link_prediction_data(
-    graph_data: Data,
-    validation_ratio: float,
-    test_ratio: float,
+def _remove_supervision_edges_from_message_passing_graph(
+    edge_index: torch.Tensor,
+    positive_pairs: list[tuple[int, int]],
     is_undirected: bool,
-    split_seed: int,
-) -> tuple[Data, Data, Data]:
-    """Create deterministic train, validation, and test link splits.
+) -> torch.Tensor:
+    """Remove supervision positive edges from the message-passing graph.
+
+    During training, the message-passing graph should not contain edges that
+    appear as positive supervision labels in the validation or test sets.
+    Otherwise the encoder can observe the answer through graph structure
+    instead of learning to predict it from neighbourhood patterns. This is
+    the same leakage prevention that the baseline pipeline applies before
+    computing Node2Vec embeddings.
 
     Parameters:
-        graph_data: Full graph data object with node features and edge index.
-        validation_ratio: Fraction of positive edges assigned to validation.
-        test_ratio: Fraction of positive edges assigned to testing.
-        is_undirected: Whether edges should be treated as undirected in splitting.
-        split_seed: Seed used to make the random split reproducible.
+        edge_index: COO edge index tensor with shape (2, number_of_edges).
+        positive_pairs: Supervision positive pairs to exclude from message passing.
+        is_undirected: Whether both directions of each pair should be removed.
 
     Returns:
-        A tuple of (train_data, validation_data, test_data) objects.
+        A filtered edge_index tensor with supervision edges excluded.
     """
-    # A fixed manual seed is set directly before splitting to make runs reproducible.
-    torch.manual_seed(int(split_seed))
-    splitter = RandomLinkSplit(
-        num_val=float(validation_ratio),
-        num_test=float(test_ratio),
-        is_undirected=bool(is_undirected),
-        add_negative_train_samples=False,
-    )
-    train_data, validation_data, test_data = splitter(graph_data)
-    return train_data, validation_data, test_data
+    edges_to_remove: set[tuple[int, int]] = set()
+    for source, target in positive_pairs:
+        edges_to_remove.add((source, target))
+        if is_undirected:
+            edges_to_remove.add((target, source))
 
-
-def build_negative_edge_labels(
-    train_data: Data,
-    negative_sampling_ratio: float,
-    is_undirected: bool,
-    negative_sampling_seed: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Create deterministic positive and negative labels for training links.
-
-    Parameters:
-        train_data: Split training data from RandomLinkSplit.
-        negative_sampling_ratio: Ratio of negatives to positives for training.
-        is_undirected: Whether negative samples should be generated undirected.
-        negative_sampling_seed: Seed controlling negative edge sampling choices.
-
-    Returns:
-        A tuple of (edge_label_index, edge_label) tensors.
-    """
-    positive_edge_label_index = train_data.edge_label_index
-    number_of_positive_edges = int(positive_edge_label_index.size(1))
-    number_of_negative_edges = int(
-        number_of_positive_edges * float(negative_sampling_ratio)
-    )
-
-    # The seed is reset before negative sampling so the sampled negatives are repeatable.
-    torch.manual_seed(int(negative_sampling_seed))
-    negative_edge_label_index = negative_sampling(
-        edge_index=train_data.edge_index,
-        num_nodes=int(train_data.num_nodes),
-        num_neg_samples=number_of_negative_edges,
-        method="sparse",
-        force_undirected=bool(is_undirected),
-    )
-    number_of_negative_edges = int(negative_edge_label_index.size(1))
-
-    positive_edge_labels = torch.ones(number_of_positive_edges, dtype=torch.float32)
-    negative_edge_labels = torch.zeros(number_of_negative_edges, dtype=torch.float32)
-    edge_label_index = torch.cat(
-        [positive_edge_label_index, negative_edge_label_index], dim=1
-    )
-    edge_labels = torch.cat([positive_edge_labels, negative_edge_labels], dim=0)
-    return edge_label_index, edge_labels
+    # Convert to Python lists for fast iteration and set membership testing.
+    source_nodes = edge_index[0].tolist()
+    target_nodes = edge_index[1].tolist()
+    keep_indices = [
+        i
+        for i, (source, target) in enumerate(zip(source_nodes, target_nodes))
+        if (source, target) not in edges_to_remove
+    ]
+    if keep_indices:
+        return edge_index[:, torch.tensor(keep_indices, dtype=torch.long)]
+    return torch.empty((2, 0), dtype=torch.long)
 
 
 def create_train_loader(
@@ -583,6 +548,12 @@ def collect_probabilities(
 
 def train_graphsage_model(
     graph_data: Data,
+    train_pairs: list[tuple[int, int]],
+    train_labels: np.ndarray,
+    validation_pairs: list[tuple[int, int]],
+    validation_labels: np.ndarray,
+    test_pairs: list[tuple[int, int]],
+    test_labels: np.ndarray,
     run_directory: str,
     configuration: dict[str, Any],
     node_id_to_index: dict[str, int],
@@ -590,10 +561,26 @@ def train_graphsage_model(
     node_name_to_id: dict[str, str],
     node_display_name_by_id: dict[str, str],
 ) -> dict[str, Any]:
-    """Train GraphSAGE for binary link prediction and write run artefacts.
+    """Train GraphSAGE for binary link prediction using external supervision labels.
+
+    The message-passing graph (graph_data) provides structural context for
+    neighbourhood aggregation, while the supervision pairs and labels define
+    the prediction task. This decoupling allows the model to learn from
+    ground truth labels while using a separate edge set for structural
+    signal, which is the standard approach for knowledge graph link
+    prediction. Validation and test positive edges are removed from the
+    message-passing graph during training to prevent evaluation leakage,
+    but the full graph is saved to the serving bundle so all edges are
+    available at inference time.
 
     Parameters:
-        graph_data: Full graph data object built from node features and edges.
+        graph_data: Full graph data object with node features and edges from edges.csv.
+        train_pairs: Supervised training pairs as (source_index, target_index) tuples.
+        train_labels: Binary labels (0 or 1) aligned with train_pairs.
+        validation_pairs: Supervised validation pairs for best-model selection.
+        validation_labels: Binary labels aligned with validation_pairs.
+        test_pairs: Supervised test pairs for final metric computation.
+        test_labels: Binary labels aligned with test_pairs.
         run_directory: Output directory where metrics and model artefacts are saved.
         configuration: Full configuration mapping used for this training run.
         node_id_to_index: Mapping from node identifier strings to contiguous indices.
@@ -607,8 +594,6 @@ def train_graphsage_model(
     graphsage_configuration = dict(configuration.get("graphsage", {}))
     resolved_device = torch.device(str(configuration["device"]))
     split_seed = int(configuration["seed"])
-    validation_ratio = float(configuration["splits"]["val_ratio"])
-    test_ratio = float(configuration["splits"]["test_ratio"])
     is_undirected = bool(configuration["data"]["undirected"])
     hidden_dimension = int(graphsage_configuration.get("hidden_dim", 64))
     output_dimension = int(graphsage_configuration.get("output_dim", 64))
@@ -616,9 +601,6 @@ def train_graphsage_model(
     learning_rate = float(graphsage_configuration.get("learning_rate", 0.001))
     number_of_epochs = int(graphsage_configuration.get("epochs", 10))
     batch_size = int(graphsage_configuration.get("batch_size", 256))
-    negative_sampling_ratio = float(
-        graphsage_configuration.get("negative_sampling_ratio", 1.0)
-    )
     number_of_neighbours = list(graphsage_configuration.get("num_neighbors", [20, 10]))
     decoder_type = str(graphsage_configuration.get("decoder_type", "mlp"))
     decoder_hidden_dimension = int(
@@ -630,24 +612,60 @@ def train_graphsage_model(
     attachment_seed = int(graphsage_configuration.get("attachment_seed", split_seed))
     attachment_top_k = int(graphsage_configuration.get("attachment_top_k", 5))
 
-    train_data, validation_data, test_data = split_link_prediction_data(
-        graph_data=graph_data,
-        validation_ratio=validation_ratio,
-        test_ratio=test_ratio,
+    # Remove validation and test positive edges from the message-passing graph
+    # so the encoder cannot observe supervision answers through graph structure.
+    # The full graph is saved separately for the serving bundle.
+    validation_positive_pairs = [
+        pair
+        for pair, label in zip(validation_pairs, validation_labels)
+        if label == 1
+    ]
+    test_positive_pairs = [
+        pair for pair, label in zip(test_pairs, test_labels) if label == 1
+    ]
+    leakage_safe_edge_index = _remove_supervision_edges_from_message_passing_graph(
+        edge_index=graph_data.edge_index,
+        positive_pairs=validation_positive_pairs + test_positive_pairs,
         is_undirected=is_undirected,
-        split_seed=split_seed,
     )
-    train_edge_label_index, train_edge_labels = build_negative_edge_labels(
-        train_data=train_data,
-        negative_sampling_ratio=negative_sampling_ratio,
-        is_undirected=is_undirected,
-        negative_sampling_seed=split_seed,
+
+    # Convert supervision pairs and labels to PyTorch tensors for training.
+    train_edge_label_index = torch.tensor(
+        [[pair[0] for pair in train_pairs], [pair[1] for pair in train_pairs]],
+        dtype=torch.long,
     )
+    train_edge_labels = torch.as_tensor(train_labels, dtype=torch.float32)
+
     train_loader = create_train_loader(
         edge_label_index=train_edge_label_index,
         edge_labels=train_edge_labels,
         batch_size=batch_size,
         loader_seed=split_seed,
+    )
+
+    # Construct Data objects for validation and test evaluation. Each bundles the
+    # leakage-safe message-passing graph with the supervision labels for that split,
+    # so collect_probabilities can read all required fields from a single object.
+    validation_data = Data(
+        x=graph_data.x,
+        edge_index=leakage_safe_edge_index,
+        edge_label_index=torch.tensor(
+            [
+                [pair[0] for pair in validation_pairs],
+                [pair[1] for pair in validation_pairs],
+            ],
+            dtype=torch.long,
+        ),
+        edge_label=torch.as_tensor(validation_labels, dtype=torch.float32),
+    )
+    test_data = Data(
+        x=graph_data.x,
+        edge_index=leakage_safe_edge_index,
+        edge_label_index=torch.tensor(
+            [[pair[0] for pair in test_pairs], [pair[1] for pair in test_pairs]],
+            dtype=torch.long,
+        ),
+        edge_label=torch.as_tensor(test_labels, dtype=torch.float32),
     )
 
     model = GraphSageLinkPredictor(
@@ -665,8 +683,8 @@ def train_graphsage_model(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay
     )
     loss_function = nn.BCEWithLogitsLoss()
-    train_node_features = train_data.x.to(resolved_device)
-    train_edge_index = train_data.edge_index.to(resolved_device)
+    train_node_features = graph_data.x.to(resolved_device)
+    train_edge_index = leakage_safe_edge_index.to(resolved_device)
 
     # Track best validation ROC-AUC across epochs and keep the corresponding weights.
     # This prevents overfitting when using learnable decoders (MLP, bilinear) that can
@@ -727,13 +745,13 @@ def train_graphsage_model(
         flush=True,
     )
 
-    validation_labels, validation_probabilities = collect_probabilities(
+    final_validation_labels, validation_probabilities = collect_probabilities(
         model=model,
         split_data=validation_data,
         batch_size=batch_size,
         device=resolved_device,
     )
-    test_labels, test_probabilities = collect_probabilities(
+    final_test_labels, test_probabilities = collect_probabilities(
         model=model,
         split_data=test_data,
         batch_size=batch_size,
@@ -743,12 +761,12 @@ def train_graphsage_model(
     curves_directory = os.path.join(run_directory, "curves")
     ensure_dir(curves_directory)
     validation_metrics = compute_classification_metrics(
-        validation_labels,
+        final_validation_labels,
         validation_probabilities,
         precision_at_k,
     )
     test_metrics = compute_and_plot(
-        y_true=test_labels,
+        y_true=final_test_labels,
         y_prob=test_probabilities,
         out_dir=curves_directory,
         k=precision_at_k,
@@ -757,6 +775,9 @@ def train_graphsage_model(
 
     training_state_path = os.path.join(run_directory, "graphsage_model_state.pt")
     torch.save(model.state_dict(), training_state_path)
+    # Save the FULL graph (including val/test edges) for the serving bundle. At
+    # inference time there is no train/val/test split, so all edges should be
+    # available for message passing.
     np.save(
         os.path.join(run_directory, "graphsage_node_features.npy"),
         graph_data.x.cpu().numpy(),
@@ -800,7 +821,6 @@ def train_graphsage_model(
             "learning_rate": learning_rate,
             "batch_size": batch_size,
             "num_neighbors": number_of_neighbours,
-            "negative_sampling_ratio": negative_sampling_ratio,
             "decoder_type": decoder_type,
             "decoder_hidden_dim": decoder_hidden_dimension,
             "weight_decay": weight_decay,
