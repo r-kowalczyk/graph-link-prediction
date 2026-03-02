@@ -280,6 +280,7 @@ def _load_graphsage_model(
         dropout_rate=float(model_configuration["dropout"]),
         decoder_type=str(model_configuration.get("decoder_type", "mlp")),
         decoder_hidden_dimension=int(model_configuration.get("decoder_hidden_dim", 64)),
+        num_layers=int(model_configuration.get("num_layers", 2)),
     )
     model_state_path = os.path.join(run_directory, "graphsage_model_state.pt")
     state_dictionary = torch.load(

@@ -29,9 +29,12 @@ from .utils import ensure_dir, write_json
 class GraphSageEncoder(nn.Module):
     """Encode node features into structural representations with GraphSAGE layers.
 
-    The encoder uses two neighbourhood aggregation layers so it remains fast on CPU.
-    A two-layer design is chosen because it captures local graph context clearly while
-    keeping the quickstart training time small and stable for repeated demonstrations.
+    The encoder stacks a configurable number of neighbourhood aggregation layers
+    so the receptive field can be tuned to the graph diameter. Each intermediate
+    layer uses an additive residual (skip) connection so that deeper encoders
+    do not suffer from over-smoothing, where all node embeddings converge to
+    similar values. When the final layer changes dimensionality (hidden_dim
+    differs from output_dim), the residual is linearly projected to match.
     """
 
     def __init__(
@@ -40,24 +43,54 @@ class GraphSageEncoder(nn.Module):
         hidden_dimension: int,
         output_dimension: int,
         dropout_rate: float,
+        num_layers: int = 2,
     ) -> None:
-        """Initialise GraphSAGE layers and dropout for link prediction encoding.
+        """Initialise a variable-depth GraphSAGE encoder with residual connections.
 
         Parameters:
             input_dimension: Dimension of node input features.
-            hidden_dimension: Hidden representation width after the first layer.
+            hidden_dimension: Hidden representation width used by all intermediate layers.
             output_dimension: Final embedding width produced for decoding.
             dropout_rate: Dropout applied between layers to reduce overfitting.
+            num_layers: Number of SAGEConv aggregation layers. Each layer extends
+                the receptive field by one hop, so a 3-layer encoder sees 3-hop
+                neighbourhoods. Minimum is 1.
         """
         super().__init__()
-        self.first_convolution = SAGEConv(input_dimension, hidden_dimension)
-        self.second_convolution = SAGEConv(hidden_dimension, output_dimension)
         self.dropout_rate = float(dropout_rate)
+        self.convolutions = nn.ModuleList()
+
+        if num_layers == 1:
+            # Single layer maps directly from input to output dimensions.
+            self.convolutions.append(SAGEConv(input_dimension, output_dimension))
+        else:
+            # First layer projects input features into the hidden dimension.
+            self.convolutions.append(SAGEConv(input_dimension, hidden_dimension))
+            # Middle layers keep the hidden dimension constant so additive
+            # residual connections work without any projection.
+            for _ in range(num_layers - 2):
+                self.convolutions.append(SAGEConv(hidden_dimension, hidden_dimension))
+            # Final layer maps from hidden to output dimension.
+            self.convolutions.append(SAGEConv(hidden_dimension, output_dimension))
+
+        # When the final layer changes dimensionality, the residual must be
+        # projected to match. For middle layers the dimensions are identical
+        # so no projection is needed.
+        needs_final_projection = num_layers > 1 and hidden_dimension != output_dimension
+        self.final_residual_projection: nn.Linear | None = (
+            nn.Linear(hidden_dimension, output_dimension, bias=False)
+            if needs_final_projection
+            else None
+        )
 
     def forward(
         self, node_features: torch.Tensor, edge_index: torch.Tensor
     ) -> torch.Tensor:
-        """Propagate node features through two GraphSAGE aggregation layers.
+        """Propagate node features through the GraphSAGE aggregation layers.
+
+        Each layer after the first adds a residual connection from its input
+        to its output, preventing the loss of distinguishing node information
+        that causes over-smoothing in deeper graph neural networks.
 
         Parameters:
             node_features: Dense node feature matrix with shape (nodes, features).
@@ -66,13 +99,32 @@ class GraphSageEncoder(nn.Module):
         Returns:
             Node embedding matrix with shape (nodes, output_dimension).
         """
-        # The first aggregation creates a local neighbourhood-aware hidden signal.
-        hidden_node_features = self.first_convolution(node_features, edge_index)
-        hidden_node_features = torch_functional.relu(hidden_node_features)
-        hidden_node_features = torch_functional.dropout(
-            hidden_node_features, p=self.dropout_rate, training=self.training
+        hidden = self.convolutions[0](node_features, edge_index)
+        hidden = torch_functional.relu(hidden)
+        hidden = torch_functional.dropout(
+            hidden, p=self.dropout_rate, training=self.training
         )
-        return self.second_convolution(hidden_node_features, edge_index)
+
+        for convolution in self.convolutions[1:-1]:
+            # Additive residual: dimensions match because all middle layers
+            # use hidden_dimension for both input and output.
+            residual = hidden
+            hidden = convolution(hidden, edge_index)
+            hidden = hidden + residual
+            hidden = torch_functional.relu(hidden)
+            hidden = torch_functional.dropout(
+                hidden, p=self.dropout_rate, training=self.training
+            )
+
+        if len(self.convolutions) > 1:
+            residual = hidden
+            hidden = self.convolutions[-1](hidden, edge_index)
+            # Project the residual when the final layer changes dimensionality.
+            if self.final_residual_projection is not None:
+                residual = self.final_residual_projection(residual)
+            hidden = hidden + residual
+
+        return hidden
 
 
 class DotProductLinkDecoder(nn.Module):
@@ -258,6 +310,7 @@ class GraphSageLinkPredictor(nn.Module):
         dropout_rate: float,
         decoder_type: str = "mlp",
         decoder_hidden_dimension: int = 64,
+        num_layers: int = 2,
     ) -> None:
         """Create encoder and decoder modules for binary link scoring.
 
@@ -268,6 +321,7 @@ class GraphSageLinkPredictor(nn.Module):
             dropout_rate: Dropout probability used inside the encoder.
             decoder_type: Which decoder architecture to use ("dot_product", "bilinear", or "mlp").
             decoder_hidden_dimension: Hidden layer width for the MLP decoder (ignored by other decoders).
+            num_layers: Number of SAGEConv aggregation layers in the encoder.
         """
         super().__init__()
         self.encoder = GraphSageEncoder(
@@ -275,6 +329,7 @@ class GraphSageLinkPredictor(nn.Module):
             hidden_dimension=hidden_dimension,
             output_dimension=output_dimension,
             dropout_rate=dropout_rate,
+            num_layers=num_layers,
         )
         self.decoder = _build_decoder(
             decoder_type=decoder_type,
@@ -606,6 +661,7 @@ def train_graphsage_model(
     decoder_hidden_dimension = int(
         graphsage_configuration.get("decoder_hidden_dim", 64)
     )
+    num_layers = int(graphsage_configuration.get("num_layers", 2))
     weight_decay = float(graphsage_configuration.get("weight_decay", 1e-3))
     precision_at_k = int(configuration["metrics"]["precision_at_k"])
     plot_dpi = int(configuration["plots"]["dpi"])
@@ -616,9 +672,7 @@ def train_graphsage_model(
     # so the encoder cannot observe supervision answers through graph structure.
     # The full graph is saved separately for the serving bundle.
     validation_positive_pairs = [
-        pair
-        for pair, label in zip(validation_pairs, validation_labels)
-        if label == 1
+        pair for pair, label in zip(validation_pairs, validation_labels) if label == 1
     ]
     test_positive_pairs = [
         pair for pair, label in zip(test_pairs, test_labels) if label == 1
@@ -675,6 +729,7 @@ def train_graphsage_model(
         dropout_rate=dropout_rate,
         decoder_type=decoder_type,
         decoder_hidden_dimension=decoder_hidden_dimension,
+        num_layers=num_layers,
     ).to(resolved_device)
     # L2 weight decay penalises large parameter values and is the primary guard
     # against overfitting in full-graph message passing where the encoder sees the
@@ -683,6 +738,13 @@ def train_graphsage_model(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay
     )
     loss_function = nn.BCEWithLogitsLoss()
+    # Cosine annealing decays the learning rate from its initial value to near
+    # zero over the full training run. This allows faster early learning while
+    # fine-tuning in later epochs, and is strictly better than a constant rate
+    # for fixed-length training schedules.
+    learning_rate_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimiser, T_max=number_of_epochs
+    )
     train_node_features = graph_data.x.to(resolved_device)
     train_edge_index = leakage_safe_edge_index.to(resolved_device)
 
@@ -706,6 +768,7 @@ def train_graphsage_model(
             loss.backward()
             optimiser.step()
             epoch_loss_values.append(float(loss.item()))
+        learning_rate_scheduler.step()
         mean_epoch_loss = (
             float(np.mean(epoch_loss_values)) if epoch_loss_values else 0.0
         )
@@ -803,6 +866,7 @@ def train_graphsage_model(
             "input_dim": int(graph_data.x.size(1)),
             "decoder_type": decoder_type,
             "decoder_hidden_dim": decoder_hidden_dimension,
+            "num_layers": num_layers,
         },
     }
     write_json(os.path.join(run_directory, "graphsage_metadata.json"), metadata)
@@ -823,6 +887,7 @@ def train_graphsage_model(
             "num_neighbors": number_of_neighbours,
             "decoder_type": decoder_type,
             "decoder_hidden_dim": decoder_hidden_dimension,
+            "num_layers": num_layers,
             "weight_decay": weight_decay,
             "split_seed": split_seed,
         },
@@ -925,6 +990,7 @@ def load_graphsage_bundle(
         dropout_rate=float(model_configuration["dropout"]),
         decoder_type=str(model_configuration.get("decoder_type", "dot_product")),
         decoder_hidden_dimension=int(model_configuration.get("decoder_hidden_dim", 64)),
+        num_layers=int(model_configuration.get("num_layers", 2)),
     ).to(device)
     state_dictionary = torch.load(
         os.path.join(bundle_directory, "model_state.pt"),

@@ -95,6 +95,32 @@ def test_all_decoder_types_produce_correct_output_shape(decoder_type):
     assert logits.shape == (2,)
 
 
+@pytest.mark.parametrize("num_layers", [1, 2, 3, 4])
+def test_encoder_depth_produces_correct_output_shape(num_layers):
+    """Encoders with varying depth should all produce (nodes, output_dim) embeddings.
+
+    Deeper encoders use residual connections internally. When hidden_dim differs
+    from output_dim the final residual is linearly projected. This test verifies
+    that the output shape is correct regardless of depth and that the residual
+    projection activates when dimensions differ.
+    """
+
+    torch.manual_seed(0)
+    model = GraphSageLinkPredictor(
+        input_dimension=8,
+        hidden_dimension=6,
+        output_dimension=4,
+        dropout_rate=0.0,
+        decoder_type="dot_product",
+        num_layers=num_layers,
+    )
+    model.eval()
+    node_features = torch.randn(5, 8)
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    embeddings = model.encode(node_features=node_features, edge_index=edge_index)
+    assert embeddings.shape == (5, 4)
+
+
 def test_build_graph_data_supports_empty_edge_list():
     """Graph data builder should keep node features when no edges exist."""
 
@@ -228,6 +254,7 @@ def test_train_graphsage_model_and_bundle_roundtrip(tmp_path):
     assert manifest["semantic_model_name"] == "test-model"
     assert manifest["model"]["decoder_type"] == "mlp"
     assert manifest["model"]["decoder_hidden_dim"] == 8
+    assert manifest["model"]["num_layers"] == 2
 
 
 def test_export_graphsage_bundle_checks_missing_required_files(tmp_path):

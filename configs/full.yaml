@@ -57,13 +57,13 @@ model:
 graphsage:
   hidden_dim: 256
   output_dim: 128
-  dropout: 0.3
+  num_layers: 3
+  dropout: 0.15
   learning_rate: 0.001
-  weight_decay: 0.01
+  weight_decay: 0.001
   epochs: 50
   batch_size: 512
   num_neighbors: [25, 10]
-  negative_sampling_ratio: 1.0
   decoder_type: mlp
   decoder_hidden_dim: 128
   attachment_top_k: 5
