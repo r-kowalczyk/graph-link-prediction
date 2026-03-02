@@ -94,7 +94,37 @@ When the API receives a request involving an entity that is not in the training 
 3. Runs GraphSAGE message passing over the augmented graph to produce an embedding for the new node.
 4. Scores the new node against the requested target (or all candidates for top-k retrieval) using the configured decoder (MLP by default).
 
-This attachment heuristic is deterministic (seeded) and simple by design. It assumes that semantically similar entities are likely to be structurally close in the graph. This is a reasonable starting point for biomedical knowledge graphs but is not a production graph-construction strategy.
+This attachment heuristic is deterministic (seeded) and simple by design. It assumes that semantically similar entities are likely to be structurally close in the graph. The server can also attach new nodes using **real interaction edges** from the STRING API (see `attachment_strategy` below). That gives the model genuine structural context instead of text-similarity alone.
+
+## Evaluating attachment strategy (cosine vs interaction)
+
+The test ROC-AUC reported during training is **transductive**: it measures how well the model scores edges between nodes that were all in the training graph. It does **not** measure how well the model does when one endpoint is a **new** (unseen) entity. The choice of attachment strategy (cosine similarity vs STRING interaction partners) only affects inductive requests, so to see whether the interaction strategy improves performance you need an **inductive evaluation**.
+
+### What to measure
+
+For a set of "new" entities with known links to nodes in the graph:
+
+1. Score each (new_entity, existing_entity) pair with the serving engine using `attachment_strategy="cosine"` and again with `attachment_strategy="interaction"`.
+2. Build binary labels: 1 for true links, 0 for negatives (e.g. random existing nodes that are not true neighbours).
+3. Compute ROC-AUC and PR-AUC per strategy over those scores. Compare the two strategies.
+
+### How to get an inductive test set
+
+**Option A: Hold out nodes at training time.** Split nodes into training nodes (e.g. 90%) and inductive test nodes (10%). Build the graph and train GraphSAGE using only training nodes and edges between them. Export the bundle. For each inductive test node you have ground truth: its real edges to training nodes (from your original edge list). Sample negatives (test node, random training node with no edge). This gives you a list of (new_entity_name, new_entity_description, existing_entity_name, label). Running this requires a training pipeline that supports excluding a fraction of nodes (and their edges) from the graph; that is not implemented in the current codebase, so you would need to add a node hold-out step or train on a manually reduced dataset.
+
+**Option B: Use the evaluation script with a hand-built CSV.** If you have an external list of new entities and their known links (e.g. from a different database or a manual curation), put them in a CSV with columns: `new_entity_name`, `new_entity_description`, `existing_entity_name`, `label` (0 or 1). Run the comparison script (see below) against a bundle trained on your full graph. Note: the "new" entities must not appear in the bundle's graph, otherwise the server will resolve them as existing nodes and attachment strategy will not apply.
+
+### Comparison script
+
+The repository includes a script that loads a serving bundle and a CSV of inductive pairs, runs the engine with both attachment strategies, and reports metrics for each:
+
+```bash
+uv run python scripts/compare_attachment_strategies.py \
+  --bundle-dir path/to/serving_bundle \
+  --inductive-csv path/to/inductive_test_pairs.csv
+```
+
+The CSV must have columns: `new_entity_name`, `new_entity_description`, `existing_entity_name`, `label`. The script prints ROC-AUC and PR-AUC for `cosine` and `interaction` so you can compare. See the script docstring for details.
 
 ## Configuration
 
@@ -115,6 +145,8 @@ GraphSAGE parameters live under the `graphsage` key in the YAML config. The rele
 | `graphsage.decoder_hidden_dim` | 128 | Hidden layer width for the MLP decoder (ignored by other decoders) |
 | `graphsage.attachment_top_k` | 5 | Number of similarity edges when attaching a new node |
 | `graphsage.attachment_seed` | 42 | Seed for deterministic similarity-based attachment |
+
+At serving time you can override how new nodes are attached via the request body: set `attachment_strategy` to `"cosine"` (semantic similarity only) or `"interaction"` (STRING API partners, with cosine fallback when no graph matches). The default is `"interaction"`.
 
 Set `model.backend: graphsage` in the config or pass `--model graphsage` on the command line to select this backend.
 

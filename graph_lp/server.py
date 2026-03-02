@@ -41,6 +41,7 @@ class PredictLinkRequest(BaseModel):
     entity_a_description: str | None = None
     entity_b_description: str | None = None
     attachment_top_k: int | None = None
+    attachment_strategy: str | None = None
 
 
 class PredictLinksRequest(BaseModel):
@@ -59,6 +60,7 @@ class PredictLinksRequest(BaseModel):
     top_k: int = 5
     candidate_names: list[str] | None = None
     attachment_top_k: int | None = None
+    attachment_strategy: str | None = None
 
 
 class GeneDescriptionResolver:
@@ -129,6 +131,111 @@ class GeneDescriptionResolver:
         return resolved_description
 
 
+class InteractionEdgeResolver:
+    """Resolve entity names to interaction partners using the STRING API.
+
+    The resolver fetches protein-protein interaction partners from STRING and
+    caches results on disk so repeated requests for the same entity do not
+    trigger additional network calls. Used at serving time to attach new
+    entities to the training graph via real biological edges instead of
+    cosine similarity in embedding space.
+    """
+
+    STRING_INTERACTION_PARTNERS_URL = (
+        "https://string-db.org/api/json/interaction_partners"
+    )
+    STRING_SPECIES_HUMAN = 9606
+    STRING_LIMIT = 50
+    STRING_REQUIRED_SCORE = 400
+    STRING_CALLER_IDENTITY = "graph-link-prediction"
+
+    def __init__(self, cache_path: str) -> None:
+        """Initialise resolver and load or create the interaction cache on disk.
+
+        Parameters:
+            cache_path: JSON file path used to persist interaction partner lists.
+        """
+        self.interaction_cache_path = cache_path
+        ensure_dir(os.path.dirname(cache_path))
+        if os.path.exists(cache_path):
+            with open(cache_path, "r", encoding="utf-8") as cache_file:
+                raw = json.load(cache_file)
+                self.interaction_cache: dict[str, list[dict[str, Any]]] = {
+                    str(key): list(value) for key, value in raw.items()
+                }
+        else:
+            self.interaction_cache = {}
+
+    def resolve(self, entity_name: str) -> list[tuple[str, float]]:
+        """Return interaction partners for an entity from cache or STRING API.
+
+        Parameters:
+            entity_name: Gene or protein name to look up (e.g. BRCA1).
+
+        Returns:
+            List of (partner_name, confidence_score) tuples, ordered by
+            descending score. Empty list on API failure or when the entity
+            has no partners. Confidence score is in [0, 1] from STRING.
+        """
+        cache_key = entity_name.strip().casefold()
+        if cache_key in self.interaction_cache:
+            cached = self.interaction_cache[cache_key]
+            return [
+                (item["partner_name"], float(item["confidence_score"]))
+                for item in cached
+            ]
+
+        # POST to STRING so URL length stays bounded; form encoding matches
+        # the API documentation and Python examples.
+        request_data = urllib.parse.urlencode(
+            {
+                "identifiers": entity_name.strip(),
+                "species": self.STRING_SPECIES_HUMAN,
+                "limit": self.STRING_LIMIT,
+                "required_score": self.STRING_REQUIRED_SCORE,
+                "caller_identity": self.STRING_CALLER_IDENTITY,
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            self.STRING_INTERACTION_PARTNERS_URL,
+            data=request_data,
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except Exception:
+            return []
+
+        if not isinstance(payload, list):
+            return []
+
+        result: list[tuple[str, float]] = []
+        cache_entries: list[dict[str, Any]] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            partner_name = item.get("preferredName_B")
+            score = item.get("score")
+            if partner_name is None or score is None:
+                continue
+            partner_name = str(partner_name).strip()
+            try:
+                confidence_score = float(score)
+            except (TypeError, ValueError):
+                continue
+            result.append((partner_name, confidence_score))
+            cache_entries.append(
+                {"partner_name": partner_name, "confidence_score": confidence_score}
+            )
+
+        self.interaction_cache[cache_key] = cache_entries
+        with open(self.interaction_cache_path, "w", encoding="utf-8") as cache_file:
+            json.dump(self.interaction_cache, cache_file, indent=2, sort_keys=True)
+        return result
+
+
 @dataclass
 class ResolvedEntity:
     """Container for existing or newly introduced entity resolution state.
@@ -179,6 +286,10 @@ class GraphSageServingEngine:
         self.resolver = GeneDescriptionResolver(
             cache_path=os.path.join(bundle_directory, "resolver_cache.json")
         )
+        self.interaction_resolver = InteractionEdgeResolver(
+            cache_path=os.path.join(bundle_directory, "interaction_cache.json")
+        )
+        self.default_attachment_strategy = "interaction"
         with torch.no_grad():
             self.base_node_embeddings = self.bundle.model.encode(
                 node_features=self.bundle.node_features,
@@ -253,7 +364,40 @@ class GraphSageServingEngine:
             embedding_vector=embedding_vector,
         )
 
-    def _select_attachment_neighbours(
+    def _select_attachment_neighbours_by_interaction(
+        self,
+        entity_name: str,
+        top_k: int,
+    ) -> list[int] | None:
+        """Select attachment neighbours from STRING interaction partners in the graph.
+
+        Resolves the entity via the interaction resolver, keeps only partners
+        that exist in the training graph, and returns their node indices sorted
+        by descending confidence score, capped at top_k.
+
+        Parameters:
+            entity_name: Name of the new entity used for STRING lookup.
+            top_k: Maximum number of neighbour indices to return.
+
+        Returns:
+            List of existing node indices, or None if no graph-matching partners
+            were found (caller should fall back to cosine similarity).
+        """
+        partners_with_scores = self.interaction_resolver.resolve(entity_name)
+        indices_with_scores: list[tuple[int, float]] = []
+        for partner_name, confidence_score in partners_with_scores:
+            node_id = self.node_name_to_id_casefold.get(partner_name.casefold())
+            if node_id is None:
+                continue
+            node_index = self.bundle.node_id_to_index[node_id]
+            indices_with_scores.append((node_index, confidence_score))
+        if not indices_with_scores:
+            return None
+        # Sort by descending confidence so highest-confidence partners come first.
+        indices_with_scores.sort(key=lambda pair: pair[1], reverse=True)
+        return [index_value for index_value, _ in indices_with_scores[: int(top_k)]]
+
+    def _select_attachment_neighbours_by_cosine(
         self, embedding_vector: np.ndarray, top_k: int
     ) -> list[int]:
         """Select deterministic top-k attachment neighbours by cosine similarity.
@@ -285,21 +429,60 @@ class GraphSageServingEngine:
         ordered_indices = seeded_permutation[sorted_positions]
         return [int(index_value) for index_value in ordered_indices[: int(top_k)]]
 
+    def _select_attachment_neighbours(
+        self,
+        entity_name: str,
+        embedding_vector: np.ndarray,
+        top_k: int,
+        attachment_strategy: str,
+    ) -> list[int]:
+        """Select top-k attachment neighbours by strategy; fallback to cosine if needed.
+
+        Parameters:
+            entity_name: Name of the new entity (used for interaction lookup).
+            embedding_vector: New node semantic embedding vector (used for cosine).
+            top_k: Number of neighbours to return.
+            attachment_strategy: "interaction" or "cosine".
+
+        Returns:
+            Existing node indices to attach the new node to.
+        """
+        if attachment_strategy == "interaction":
+            by_interaction = self._select_attachment_neighbours_by_interaction(
+                entity_name=entity_name,
+                top_k=top_k,
+            )
+            if by_interaction is not None:
+                return by_interaction
+            # No graph-matching partners; fall back to cosine.
+        return self._select_attachment_neighbours_by_cosine(
+            embedding_vector=embedding_vector,
+            top_k=top_k,
+        )
+
     def _build_augmented_graph(
-        self, embedding_vector: np.ndarray, attachment_top_k: int
+        self,
+        entity_name: str,
+        embedding_vector: np.ndarray,
+        attachment_top_k: int,
+        attachment_strategy: str,
     ) -> tuple[torch.Tensor, torch.Tensor, int, list[int]]:
         """Create augmented node feature and edge tensors for one new entity.
 
         Parameters:
+            entity_name: Name of the new entity (for interaction lookup).
             embedding_vector: New entity semantic embedding vector.
             attachment_top_k: Number of similarity edges added to existing graph.
+            attachment_strategy: "interaction" or "cosine".
 
         Returns:
             Augmented node features, augmented edges, new node index, neighbour list.
         """
         selected_neighbour_indices = self._select_attachment_neighbours(
+            entity_name=entity_name,
             embedding_vector=embedding_vector,
             top_k=attachment_top_k,
+            attachment_strategy=attachment_strategy,
         )
         new_node_index = int(self.bundle.node_features.size(0))
         new_node_tensor = torch.as_tensor(
@@ -374,6 +557,7 @@ class GraphSageServingEngine:
         entity_a_description: str | None,
         entity_b_description: str | None,
         attachment_top_k: int | None,
+        attachment_strategy: str | None = None,
     ) -> dict[str, Any]:
         """Score one link between existing or inductively attached endpoints.
 
@@ -383,9 +567,11 @@ class GraphSageServingEngine:
             entity_a_description: Optional text for unseen endpoint A.
             entity_b_description: Optional text for unseen endpoint B.
             attachment_top_k: Optional neighbour count override for attachment.
+            attachment_strategy: Optional "interaction" or "cosine"; default from engine.
 
         Returns:
-            Response mapping with score and resolved endpoint identifiers.
+            Response mapping with score, resolved endpoint identifiers, and
+            attachment_strategy indicating which strategy was used.
         """
         resolved_entity_a = self._resolve_entity(entity_a_name, entity_a_description)
         resolved_entity_b = self._resolve_entity(entity_b_name, entity_b_description)
@@ -396,6 +582,11 @@ class GraphSageServingEngine:
             attachment_top_k
             if attachment_top_k is not None
             else self.bundle.attachment_top_k
+        )
+        selected_attachment_strategy = (
+            attachment_strategy
+            if attachment_strategy is not None
+            else self.default_attachment_strategy
         )
 
         if not resolved_entity_a.is_new and not resolved_entity_b.is_new:
@@ -417,6 +608,7 @@ class GraphSageServingEngine:
                     "is_new": False,
                 },
                 "attachment_neighbours": [],
+                "attachment_strategy": selected_attachment_strategy,
             }
 
         existing_entity = (
@@ -431,8 +623,10 @@ class GraphSageServingEngine:
             new_node_index,
             selected_neighbour_indices,
         ) = self._build_augmented_graph(
+            entity_name=new_entity.requested_name,
             embedding_vector=np.asarray(new_entity.embedding_vector),
             attachment_top_k=selected_attachment_top_k,
+            attachment_strategy=selected_attachment_strategy,
         )
         with torch.no_grad():
             augmented_embeddings = self.bundle.model.encode(
@@ -466,6 +660,7 @@ class GraphSageServingEngine:
                 "is_new": bool(resolved_entity_b.is_new),
             },
             "attachment_neighbours": attachment_neighbours,
+            "attachment_strategy": selected_attachment_strategy,
         }
 
     def predict_links(
@@ -475,6 +670,7 @@ class GraphSageServingEngine:
         top_k: int,
         candidate_names: list[str] | None,
         attachment_top_k: int | None,
+        attachment_strategy: str | None = None,
     ) -> dict[str, Any]:
         """Return top-k predicted links from one endpoint to existing nodes.
 
@@ -484,15 +680,22 @@ class GraphSageServingEngine:
             top_k: Number of top links returned in the response payload.
             candidate_names: Optional existing-name subset used as candidate pool.
             attachment_top_k: Optional neighbour count override for attachment.
+            attachment_strategy: Optional "interaction" or "cosine"; default from engine.
 
         Returns:
-            Response mapping with ranked links and resolved source information.
+            Response mapping with ranked links, resolved source information, and
+            attachment_strategy indicating which strategy was used.
         """
         resolved_entity = self._resolve_entity(entity_name, entity_description)
         selected_attachment_top_k = int(
             attachment_top_k
             if attachment_top_k is not None
             else self.bundle.attachment_top_k
+        )
+        selected_attachment_strategy = (
+            attachment_strategy
+            if attachment_strategy is not None
+            else self.default_attachment_strategy
         )
 
         attachment_neighbours: list[dict[str, str]] = []
@@ -503,8 +706,10 @@ class GraphSageServingEngine:
                 source_index,
                 selected_neighbour_indices,
             ) = self._build_augmented_graph(
+                entity_name=resolved_entity.requested_name,
                 embedding_vector=np.asarray(resolved_entity.embedding_vector),
                 attachment_top_k=selected_attachment_top_k,
+                attachment_strategy=selected_attachment_strategy,
             )
             with torch.no_grad():
                 scoring_embeddings = self.bundle.model.encode(
@@ -584,6 +789,7 @@ class GraphSageServingEngine:
             },
             "top_links": top_links,
             "attachment_neighbours": attachment_neighbours,
+            "attachment_strategy": selected_attachment_strategy,
         }
 
 
@@ -619,6 +825,7 @@ def create_app(bundle_directory: str, device_name: str = "cpu") -> FastAPI:
                 entity_a_description=request.entity_a_description,
                 entity_b_description=request.entity_b_description,
                 attachment_top_k=request.attachment_top_k,
+                attachment_strategy=request.attachment_strategy,
             )
         except ValueError as exception:
             raise HTTPException(status_code=400, detail=str(exception)) from exception
@@ -633,6 +840,7 @@ def create_app(bundle_directory: str, device_name: str = "cpu") -> FastAPI:
                 top_k=request.top_k,
                 candidate_names=request.candidate_names,
                 attachment_top_k=request.attachment_top_k,
+                attachment_strategy=request.attachment_strategy,
             )
         except ValueError as exception:
             raise HTTPException(status_code=400, detail=str(exception)) from exception
