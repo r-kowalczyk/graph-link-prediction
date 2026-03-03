@@ -15,11 +15,10 @@ from graph_lp.graphsage import (
     GraphSageLinkPredictor,
     MLPLinkDecoder,
     _build_decoder,
+    _remove_supervision_edges_from_message_passing_graph,
     build_graph_data,
-    build_negative_edge_labels,
     export_graphsage_bundle,
     load_graphsage_bundle,
-    split_link_prediction_data,
     train_graphsage_model,
 )
 
@@ -96,6 +95,32 @@ def test_all_decoder_types_produce_correct_output_shape(decoder_type):
     assert logits.shape == (2,)
 
 
+@pytest.mark.parametrize("num_layers", [1, 2, 3, 4])
+def test_encoder_depth_produces_correct_output_shape(num_layers):
+    """Encoders with varying depth should all produce (nodes, output_dim) embeddings.
+
+    Deeper encoders use residual connections internally. When hidden_dim differs
+    from output_dim the final residual is linearly projected. This test verifies
+    that the output shape is correct regardless of depth and that the residual
+    projection activates when dimensions differ.
+    """
+
+    torch.manual_seed(0)
+    model = GraphSageLinkPredictor(
+        input_dimension=8,
+        hidden_dimension=6,
+        output_dimension=4,
+        dropout_rate=0.0,
+        decoder_type="dot_product",
+        num_layers=num_layers,
+    )
+    model.eval()
+    node_features = torch.randn(5, 8)
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    embeddings = model.encode(node_features=node_features, edge_index=edge_index)
+    assert embeddings.shape == (5, 4)
+
+
 def test_build_graph_data_supports_empty_edge_list():
     """Graph data builder should keep node features when no edges exist."""
 
@@ -109,54 +134,37 @@ def test_build_graph_data_supports_empty_edge_list():
     assert graph_data.edge_index.shape == (2, 0)
 
 
-def test_split_link_prediction_data_is_deterministic():
-    """RandomLinkSplit output should be repeatable with a fixed seed."""
+def test_remove_supervision_edges_filters_correctly():
+    """Leakage removal should drop matching edges and keep unrelated ones."""
 
-    graph_data = _create_toy_graph_data()
-    split_a = split_link_prediction_data(
-        graph_data=graph_data,
-        validation_ratio=0.2,
-        test_ratio=0.2,
-        is_undirected=True,
-        split_seed=42,
+    # A graph with edges: 0->1, 1->0, 1->2, 2->1, 2->3, 3->2
+    edge_index = torch.tensor(
+        [[0, 1, 1, 2, 2, 3], [1, 0, 2, 1, 3, 2]], dtype=torch.long
     )
-    split_b = split_link_prediction_data(
-        graph_data=graph_data,
-        validation_ratio=0.2,
-        test_ratio=0.2,
+    # Remove positive pair (0, 1); in undirected mode both 0->1 and 1->0 go.
+    filtered = _remove_supervision_edges_from_message_passing_graph(
+        edge_index=edge_index,
+        positive_pairs=[(0, 1)],
         is_undirected=True,
-        split_seed=42,
     )
+    remaining_edges = set(zip(filtered[0].tolist(), filtered[1].tolist()))
+    assert (0, 1) not in remaining_edges
+    assert (1, 0) not in remaining_edges
+    assert (1, 2) in remaining_edges
+    assert (2, 3) in remaining_edges
+    assert filtered.size(1) == 4
 
-    assert torch.equal(split_a[0].edge_index, split_b[0].edge_index)
-    assert torch.equal(split_a[0].edge_label_index, split_b[0].edge_label_index)
-    assert torch.equal(split_a[1].edge_label_index, split_b[1].edge_label_index)
-    assert torch.equal(split_a[2].edge_label_index, split_b[2].edge_label_index)
 
+def test_remove_supervision_edges_returns_empty_when_all_removed():
+    """If every edge is a supervision positive, the result should be empty."""
 
-def test_build_negative_edge_labels_shape_and_label_order():
-    """Negative sampling output should have correct size and binary labels."""
-
-    graph_data = _create_toy_graph_data()
-    train_data, _, _ = split_link_prediction_data(
-        graph_data=graph_data,
-        validation_ratio=0.2,
-        test_ratio=0.2,
+    edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    filtered = _remove_supervision_edges_from_message_passing_graph(
+        edge_index=edge_index,
+        positive_pairs=[(0, 1)],
         is_undirected=True,
-        split_seed=42,
     )
-    edge_label_index, edge_labels = build_negative_edge_labels(
-        train_data=train_data,
-        negative_sampling_ratio=1.0,
-        is_undirected=True,
-        negative_sampling_seed=42,
-    )
-
-    positive_edge_count = int(train_data.edge_label_index.size(1))
-    assert edge_label_index.shape[1] == edge_labels.shape[0]
-    assert edge_label_index.shape[1] >= positive_edge_count
-    assert torch.all(edge_labels[:positive_edge_count] == 1.0)
-    assert torch.all(edge_labels[positive_edge_count:] == 0.0)
+    assert filtered.size(1) == 0
 
 
 def test_train_graphsage_model_and_bundle_roundtrip(tmp_path):
@@ -169,7 +177,6 @@ def test_train_graphsage_model_and_bundle_roundtrip(tmp_path):
         "seed": 42,
         "device": "cpu",
         "data": {"undirected": True},
-        "splits": {"val_ratio": 0.2, "test_ratio": 0.2},
         "metrics": {"precision_at_k": 2},
         "plots": {"dpi": 80},
         "semantic": {"model_name": "test-model", "max_length": 32},
@@ -181,7 +188,6 @@ def test_train_graphsage_model_and_bundle_roundtrip(tmp_path):
             "epochs": 1,
             "batch_size": 2,
             "num_neighbors": [2, 2],
-            "negative_sampling_ratio": 1.0,
             "decoder_type": "mlp",
             "decoder_hidden_dim": 8,
             "attachment_seed": 42,
@@ -198,8 +204,23 @@ def test_train_graphsage_model_and_bundle_roundtrip(tmp_path):
         "n3": "Node 3",
     }
 
+    # Supervision pairs and labels mimic a ground_truth.csv split. Edges
+    # (0,1) and (1,2) are positives; (0,3) and (2,0) are negatives.
+    train_pairs = [(0, 1), (1, 2), (0, 3), (2, 0)]
+    train_labels = np.array([1, 1, 0, 0], dtype=int)
+    validation_pairs = [(2, 3), (3, 0)]
+    validation_labels = np.array([1, 0], dtype=int)
+    test_pairs = [(0, 2), (3, 1)]
+    test_labels = np.array([1, 0], dtype=int)
+
     metrics = train_graphsage_model(
         graph_data=graph_data,
+        train_pairs=train_pairs,
+        train_labels=train_labels,
+        validation_pairs=validation_pairs,
+        validation_labels=validation_labels,
+        test_pairs=test_pairs,
+        test_labels=test_labels,
         run_directory=str(run_directory),
         configuration=configuration,
         node_id_to_index=node_id_to_index,
@@ -233,6 +254,7 @@ def test_train_graphsage_model_and_bundle_roundtrip(tmp_path):
     assert manifest["semantic_model_name"] == "test-model"
     assert manifest["model"]["decoder_type"] == "mlp"
     assert manifest["model"]["decoder_hidden_dim"] == 8
+    assert manifest["model"]["num_layers"] == 2
 
 
 def test_export_graphsage_bundle_checks_missing_required_files(tmp_path):

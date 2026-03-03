@@ -15,6 +15,7 @@ from graph_lp.graphsage import GraphSageLinkPredictor, LoadedGraphSageBundle
 from graph_lp.server import (
     GeneDescriptionResolver,
     GraphSageServingEngine,
+    InteractionEdgeResolver,
     create_app,
     run_server,
 )
@@ -160,6 +161,198 @@ def test_gene_description_resolver_returns_none_for_error_and_empty_hits(tmp_pat
         assert resolver.resolve("Gene Z") is None
 
 
+def test_interaction_edge_resolver_cache_hit(tmp_path):
+    """InteractionEdgeResolver should return cached partners without a network call."""
+
+    cache_path = tmp_path / "interaction_cache.json"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_data = {
+        "brca1": [
+            {"partner_name": "MDC1", "confidence_score": 0.999},
+            {"partner_name": "PALB2", "confidence_score": 0.95},
+        ]
+    }
+    cache_path.write_text(json.dumps(cache_data), encoding="utf-8")
+    resolver = InteractionEdgeResolver(str(cache_path))
+    result = resolver.resolve("BRCA1")
+    assert result == [("MDC1", 0.999), ("PALB2", 0.95)]
+
+
+def test_interaction_edge_resolver_fetches_string_api(tmp_path):
+    """InteractionEdgeResolver should parse STRING JSON and persist to cache."""
+
+    cache_path = tmp_path / "interaction_cache.json"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    resolver = InteractionEdgeResolver(str(cache_path))
+    string_payload = [
+        {
+            "stringId_A": "9606.ENSP00000418960",
+            "stringId_B": "9606.ENSP00000365588",
+            "preferredName_A": "BRCA1",
+            "preferredName_B": "MDC1",
+            "ncbiTaxonId": 9606,
+            "score": 0.999,
+        },
+        {
+            "preferredName_A": "BRCA1",
+            "preferredName_B": "BRCA2",
+            "score": 0.98,
+        },
+    ]
+    payload_bytes = json.dumps(string_payload).encode("utf-8")
+    with patch(
+        "urllib.request.urlopen",
+        return_value=_DummyResponse(payload_bytes),
+    ):
+        result = resolver.resolve("BRCA1")
+    assert result == [("MDC1", 0.999), ("BRCA2", 0.98)]
+    stored = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert "brca1" in stored
+    assert len(stored["brca1"]) == 2
+    assert stored["brca1"][0]["partner_name"] == "MDC1"
+    assert stored["brca1"][0]["confidence_score"] == 0.999
+
+
+def test_interaction_edge_resolver_returns_empty_on_failure(tmp_path):
+    """InteractionEdgeResolver should return empty list on network or parse failure."""
+
+    cache_path = tmp_path / "interaction_cache.json"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    resolver = InteractionEdgeResolver(str(cache_path))
+    with patch("urllib.request.urlopen", side_effect=RuntimeError("network error")):
+        assert resolver.resolve("BRCA1") == []
+    with patch(
+        "urllib.request.urlopen",
+        return_value=_DummyResponse(b"not json"),
+    ):
+        assert resolver.resolve("BRCA1") == []
+
+
+def test_interaction_edge_resolver_handles_malformed_payloads(tmp_path):
+    """InteractionEdgeResolver should skip malformed items and still parse valid ones.
+
+    The STRING API may return unexpected shapes: a non-list top-level value,
+    non-dict items inside the list, items missing required fields, or items
+    whose score field is not convertible to a float. Each of these branches
+    must be handled gracefully without raising an exception. Valid items that
+    appear alongside malformed ones should still be parsed and cached.
+    """
+
+    cache_path = tmp_path / "interaction_cache.json"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    resolver = InteractionEdgeResolver(str(cache_path))
+
+    # A non-list top-level response should return an empty list.
+    non_list_payload = json.dumps({"error": "bad request"}).encode("utf-8")
+    with patch(
+        "urllib.request.urlopen",
+        return_value=_DummyResponse(non_list_payload),
+    ):
+        assert resolver.resolve("GENE_A") == []
+
+    # A list containing a mix of malformed and valid items should skip the
+    # malformed ones and return only the valid partner.
+    mixed_payload = json.dumps(
+        [
+            "not a dict",
+            {"preferredName_B": "MDC1"},
+            {"preferredName_B": "BRCA2", "score": "not_a_number"},
+            {"preferredName_B": "TP53", "score": 0.9},
+        ]
+    ).encode("utf-8")
+    with patch(
+        "urllib.request.urlopen",
+        return_value=_DummyResponse(mixed_payload),
+    ):
+        result = resolver.resolve("GENE_B")
+    assert result == [("TP53", 0.9)]
+    stored = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert len(stored["gene_b"]) == 1
+    assert stored["gene_b"][0]["partner_name"] == "TP53"
+
+
+def test_select_neighbours_by_interaction_matches_graph_nodes(tmp_path, monkeypatch):
+    """When resolver returns partner names in the graph, their indices are returned."""
+
+    engine = _create_engine(tmp_path, monkeypatch)
+    engine.interaction_resolver.resolve = lambda name: [
+        ("Node B", 0.99),
+        ("Node C", 0.8),
+    ]
+    result = engine._select_attachment_neighbours_by_interaction(
+        entity_name="SomeGene",
+        top_k=2,
+    )
+    assert result is not None
+    assert set(result) == {1, 2}
+    assert result[0] == 1
+    assert result[1] == 2
+
+
+def test_select_neighbours_by_interaction_falls_back_to_cosine(tmp_path, monkeypatch):
+    """When no STRING partners match the graph, dispatcher uses cosine similarity."""
+
+    engine = _create_engine(tmp_path, monkeypatch)
+    engine.interaction_resolver.resolve = lambda name: [
+        ("UnknownGene1", 0.99),
+        ("UnknownGene2", 0.8),
+    ]
+    embedding = engine.bundle.node_features[0].detach().cpu().numpy()
+    result = engine._select_attachment_neighbours(
+        entity_name="SomeGene",
+        embedding_vector=embedding,
+        top_k=2,
+        attachment_strategy="interaction",
+    )
+    assert len(result) == 2
+    assert all(index_value in (0, 1, 2) for index_value in result)
+
+
+def test_predict_link_with_interaction_strategy(tmp_path, monkeypatch):
+    """predict_link with interaction strategy uses resolver and returns attachment_strategy."""
+
+    engine = _create_engine(tmp_path, monkeypatch)
+    engine.interaction_resolver.resolve = lambda name: [
+        ("Node B", 0.99),
+        ("Node C", 0.8),
+    ]
+    result = engine.predict_link(
+        entity_a_name="New Gene",
+        entity_b_name="Node B",
+        entity_a_description="Synthetic description",
+        entity_b_description=None,
+        attachment_top_k=2,
+        attachment_strategy="interaction",
+    )
+    assert "attachment_strategy" in result
+    assert result["attachment_strategy"] == "interaction"
+    assert len(result["attachment_neighbours"]) == 2
+    names = {n["name"] for n in result["attachment_neighbours"]}
+    assert names == {"Node B", "Node C"}
+
+
+def test_predict_links_with_interaction_strategy(tmp_path, monkeypatch):
+    """predict_links with interaction strategy uses resolver and returns attachment_strategy."""
+
+    engine = _create_engine(tmp_path, monkeypatch)
+    engine.interaction_resolver.resolve = lambda name: [
+        ("Node B", 0.99),
+        ("Node C", 0.8),
+    ]
+    result = engine.predict_links(
+        entity_name="New Node",
+        entity_description="Provided text",
+        top_k=2,
+        candidate_names=None,
+        attachment_top_k=2,
+        attachment_strategy="interaction",
+    )
+    assert result["attachment_strategy"] == "interaction"
+    assert len(result["attachment_neighbours"]) == 2
+    names = {n["name"] for n in result["attachment_neighbours"]}
+    assert names == {"Node B", "Node C"}
+
+
 def _create_engine(tmp_path, monkeypatch) -> GraphSageServingEngine:
     """Create a serving engine with mocked bundle and transformer dependencies."""
 
@@ -192,6 +385,7 @@ def test_serving_engine_predict_link_existing_and_new_paths(tmp_path, monkeypatc
     )
     assert 0.0 <= existing_result["score"] <= 1.0
     assert existing_result["attachment_neighbours"] == []
+    assert "attachment_strategy" in existing_result
 
     new_result = engine.predict_link(
         entity_a_name="New Gene",
@@ -279,7 +473,9 @@ def test_create_app_endpoints_success_and_validation_error(tmp_path, monkeypatch
         json={"entity_a_name": "Node A", "entity_b_name": "Node B"},
     )
     assert predict_link_response.status_code == 200
-    assert "score" in predict_link_response.json()
+    body = predict_link_response.json()
+    assert "score" in body
+    assert "attachment_strategy" in body
 
     predict_link_error_response = client.post(
         "/predict_link",
