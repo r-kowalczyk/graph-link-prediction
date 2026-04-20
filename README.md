@@ -27,6 +27,10 @@ The training command writes a timestamped run folder under `artifacts_quickstart
 - `config_used.yaml` (the exact config text used for the run)
 - `curves/roc.png` and `curves/pr.png` (diagnostic plots)
 
+## Serving bundles (HTTP inference)
+
+GraphSAGE training writes `graphsage_model_state.pt`, features, edges, and metadata under the run directory. Use `graph_lp.graphsage.export_graphsage_bundle(run_directory)` to assemble the **serving_bundle** folder (`model_state.pt`, `manifest.json`, `node_features.npy`, `edge_index.npy`, plus empty cache JSON files). The sibling **model-serving-platform** service loads that bundle: it applies only the **`encoder.*` weights** from the saved full-model state dict into a PyTorch Geometric GraphSAGE encoder that matches `GraphSageEncoder` in `graph_lp/graphsage.py`. The exported `edge_index.npy` already includes reverse edge rows when the graph is undirected (`build_graph_data`), so do not duplicate edges again at serve time.
+
 ## Dataset
 
 - **Quickstart dataset**: bundled CSV files under `graph_lp/sample_data/quickstart` for a small, runnable demo.
@@ -180,3 +184,9 @@ Test ROC-AUC (LogReg): 0.9296
 An alternative modelling backend based on GraphSAGE is available for binary link prediction with inductive serving support. Instead of the hybrid Node2Vec + transformer pipeline above, the GraphSAGE backend trains a graph neural network directly on semantic text embeddings, and can score links for new entities that were not present at training time.
 
 See the full documentation, including quickstart commands, serving demo, curl examples, and a Colab notebook for GPU training: **[docs/graphsage.md](docs/graphsage.md)**
+
+---
+
+## Related: HTTP serving
+
+Exported GraphSAGE bundles from this repository are consumed by **[model-serving-platform](https://github.com/r-kowalczyk/model-serving-platform)**, a FastAPI service that validates the bundle at startup, reconstructs the trained encoder, and serves link prediction over HTTP (including a documented Azure Container Apps deployment path).
